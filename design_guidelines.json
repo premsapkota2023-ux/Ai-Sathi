@@ -1,0 +1,146 @@
+{
+  "theme": "Light",
+  "archetype": "1 (Organic & Earthy)",
+  "global_vibe": "Himalayan Dawn - Warm, inviting, reliable, non-touristy. Avoid clinical tech aesthetics and generic AI purple gradients.",
+  "colors": {
+    "background": {
+      "base": "#FAFAF8",
+      "input_surface": "#FFFFFF",
+      "output_surface": "#F4F1EA",
+      "glass_overlay": "rgba(255, 255, 255, 0.8)"
+    },
+    "brand": {
+      "primary": "#D95D39",
+      "primary_hover": "#C24F2C",
+      "secondary": "#2B593F",
+      "secondary_hover": "#1F422E"
+    },
+    "text": {
+      "primary": "#1C1917",
+      "secondary": "#57534E",
+      "muted": "#A8A29E",
+      "inverse": "#FFFFFF",
+      "brand": "#D95D39"
+    },
+    "border": {
+      "subtle": "#E7E5E4",
+      "active": "#D95D39"
+    }
+  },
+  "typography": {
+    "font_families": {
+      "heading": "'Outfit', sans-serif",
+      "body": "'Work Sans', sans-serif",
+      "fallback": "system-ui, -apple-system, sans-serif"
+    },
+    "scales": {
+      "h1": "text-4xl tracking-tight leading-none font-bold",
+      "h2": "text-2xl tracking-tight leading-tight font-semibold",
+      "body_large": "text-xl leading-relaxed",
+      "body_base": "text-base leading-relaxed",
+      "label": "text-xs tracking-[0.15em] uppercase font-semibold"
+    }
+  },
+  "spacing_and_layout": {
+    "container": "w-full max-w-md mx-auto h-[100dvh] flex flex-col bg-[#FAFAF8] relative overflow-hidden",
+    "generous_padding": "p-6 md:p-8",
+    "bento_gap": "gap-4",
+    "border_radius": {
+      "small": "rounded-lg",
+      "medium": "rounded-2xl",
+      "large": "rounded-[32px]",
+      "pill": "rounded-full"
+    }
+  },
+  "components": {
+    "header": {
+      "layout": "flex justify-between items-center px-6 py-4 bg-transparent z-10",
+      "brand": "font-heading font-bold text-2xl text-[#1C1917]",
+      "accent_dot": "text-[#D95D39]"
+    },
+    "language_selector": {
+      "layout": "absolute left-1/2 -translate-x-1/2 top-[45%] -translate-y-1/2 z-20 flex items-center justify-between gap-4 bg-white/90 backdrop-blur-xl border border-[#E7E5E4] px-6 py-3 rounded-full shadow-[0_8px_32px_rgba(28,25,23,0.08)]",
+      "text_style": "font-body text-sm font-semibold text-[#1C1917]",
+      "swap_button": "p-2 rounded-full bg-[#FAFAF8] text-[#D95D39] hover:bg-[#F4F1EA] transition-colors"
+    },
+    "translation_workspace": {
+      "layout": "flex flex-col flex-1 px-4 pb-24 gap-3 relative z-0",
+      "input_card": {
+        "layout": "flex-1 min-h-[40%] bg-[#FFFFFF] rounded-[28px] p-6 shadow-sm border border-[#E7E5E4]/50 flex flex-col",
+        "textarea": "w-full h-full resize-none bg-transparent outline-none font-body text-3xl text-[#1C1917] placeholder:text-[#A8A29E] leading-tight",
+        "utility_row": "flex justify-between items-end mt-4",
+        "char_count": "text-xs font-medium text-[#A8A29E]"
+      },
+      "output_card": {
+        "layout": "flex-1 min-h-[40%] bg-[#F4F1EA] rounded-[28px] p-6 shadow-sm flex flex-col justify-between group",
+        "text_display": "font-body text-3xl text-[#1C1917] leading-tight break-words",
+        "loading_state": "animate-pulse flex gap-2 items-center text-[#D95D39]",
+        "actions_row": "flex justify-end gap-3 mt-4 opacity-100 transition-opacity"
+      }
+    },
+    "bottom_toolbar": {
+      "layout": "absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-[#FAFAF8] via-[#FAFAF8] to-transparent pt-12 flex justify-center gap-4 z-30",
+      "primary_action": "flex items-center justify-center w-16 h-16 rounded-full bg-[#D95D39] text-white shadow-[0_12px_24px_rgba(217,93,57,0.25)] hover:scale-105 active:scale-95 transition-all",
+      "secondary_action": "flex items-center justify-center w-14 h-14 rounded-full bg-white text-[#57534E] border border-[#E7E5E4] shadow-sm hover:text-[#1C1917] hover:border-[#A8A29E] active:scale-95 transition-all"
+    },
+    "icon_buttons": {
+      "speak_button": "p-3 rounded-full bg-white/60 hover:bg-white text-[#2B593F] transition-colors",
+      "copy_button": "p-3 rounded-full bg-white/60 hover:bg-white text-[#57534E] transition-colors",
+      "clear_button": "p-3 rounded-full bg-transparent hover:bg-[#F4F1EA] text-[#A8A29E] hover:text-[#D95D39] transition-colors"
+    },
+    "empty_state": {
+      "layout": "absolute inset-0 flex flex-col items-center justify-center p-8 text-center pointer-events-none z-0",
+      "image_container": "w-48 h-48 mb-6 rounded-full overflow-hidden opacity-90",
+      "heading": "font-heading text-2xl font-semibold text-[#1C1917] mb-2",
+      "description": "font-body text-base text-[#78716C] max-w-[280px]"
+    }
+  },
+  "icons": {
+    "library": "lucide-react",
+    "recommendations": {
+      "swap": "ArrowRightLeft",
+      "camera": "Camera",
+      "gallery": "ImagePlus",
+      "speak": "Volume2",
+      "copy": "Copy",
+      "clear": "X",
+      "history": "History",
+      "mic": "Mic"
+    }
+  },
+  "media": {
+    "empty_state_image": {
+      "url": "https://images.unsplash.com/photo-1746038095139-50efd91a3234?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjY2NzV8MHwxfHNlYXJjaHwyfHxoaW1hbGF5YXMlMjBkYXduJTIwbWluaW1hbGlzdHxlbnwwfHx8fDE3NzczMjc2NzJ8MA&ixlib=rb-4.1.0&q=85",
+      "description": "Minimalist photo of Himalayan mountains at dawn, to be used inside a soft organic circular mask or full background blend for the empty state."
+    }
+  },
+  "accessibility_and_interactions": {
+    "focus_states": "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D95D39] focus-visible:ring-offset-2 focus-visible:ring-offset-[#FAFAF8]",
+    "animations": {
+      "hover": "transition-all duration-200 ease-[cubic-bezier(0.25,1,0.5,1)]",
+      "active": "active:scale-95",
+      "slide_up": "animate-in slide-in-from-bottom-4 fade-in duration-300"
+    }
+  },
+  "testing": {
+    "data_testid_requirements": [
+      "language-swap-button",
+      "source-text-input",
+      "translated-text-output",
+      "play-audio-button",
+      "copy-clipboard-button",
+      "camera-capture-button",
+      "gallery-upload-button",
+      "clear-text-button",
+      "app-header-logo"
+    ]
+  },
+  "instructions_to_main_agent": [
+    "Build a mobile-first, single-screen experience. The main layout should not scroll; rather, the input and output areas should handle their own internal scrolling if text overflows.",
+    "Do NOT use standard Shadcn UI Cards or standard inputs. Use pure Tailwind to craft the 'cardless' input areas detailed in `components.translation_workspace` to maintain the frictionless, fluid feel.",
+    "Implement the 'Language Selector' as a floating pill (absolute positioned) that overlaps the boundary between the top (input) and bottom (output) cards. This creates tension and visual interest.",
+    "The camera and gallery actions should reside in a floating `bottom_toolbar` that sticks to the bottom. Prioritize Camera as the primary action (Terracotta color) and Gallery as secondary.",
+    "Do NOT use generic violet or purple. Stick strictly to the warm Terracotta (#D95D39) and Forest Green (#2B593F) over the Off-white base.",
+    "Always apply `data-testid` attributes to interactive elements for testing."
+  ]
+}
