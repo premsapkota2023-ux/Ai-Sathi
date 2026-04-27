@@ -90,12 +90,22 @@ async function speakText(text: string, lang: Lang, onDone?: () => void) {
   try {
     Speech.stop();
   } catch {}
+  // Ensure audio routes to the loud speaker (not earpiece) — important after recording.
+  if (Platform.OS !== "web") {
+    try {
+      await setAudioModeAsync({
+        playsInSilentMode: true,
+        allowsRecording: false,
+      });
+    } catch {}
+  }
   const opts = await pickVoiceOptions(lang);
   Speech.speak(text, {
     language: opts.language,
     voice: opts.voice,
     rate: 0.95,
     pitch: 1.0,
+    volume: 1.0,
     onDone: () => onDone?.(),
     onStopped: () => onDone?.(),
     onError: () => onDone?.(),
@@ -466,6 +476,16 @@ export default function Index() {
         throw new Error(t || `HTTP ${res.status}`);
       }
       const data = await res.json();
+      // Restore playback audio mode so subsequent TTS goes to the loud speaker
+      // (iOS leaves the session in record mode which routes to the earpiece).
+      if (Platform.OS !== "web") {
+        try {
+          await setAudioModeAsync({
+            playsInSilentMode: true,
+            allowsRecording: false,
+          });
+        } catch {}
+      }
       const text = (data.text || "").trim();
       if (!text) {
         setError("Could not understand the audio. Please try speaking again.");
