@@ -51,31 +51,51 @@ async function pickVoiceOptions(lang: Lang): Promise<{
   voice?: string;
   available: boolean;
 }> {
+  // For English output, AVOID en-IN (Indian English voices like "Rishi" have a
+  // strong B/V accent issue). Prefer en-US then en-GB, then en-AU/IE, then any en.
   const targets =
     lang === "ne"
       ? ["ne-NP", "ne-IN", "ne", "hi-IN", "hi"]
-      : ["en-US", "en-GB", "en-IN", "en"];
+      : ["en-US", "en-GB", "en-AU", "en-IE", "en-CA", "en-ZA", "en"];
   try {
     const voices = await Speech.getAvailableVoicesAsync();
     if (!voices || voices.length === 0) {
       return { language: targets[0], available: true };
     }
+
+    // Prefer enhanced-quality voices when available.
+    const prefer = (a: any, b: any) => {
+      const ae = a.quality === "Enhanced" ? 1 : 0;
+      const be = b.quality === "Enhanced" ? 1 : 0;
+      return be - ae;
+    };
+
     for (const t of targets) {
-      const exact = voices.find(
+      const matches = voices.filter(
         (v) => v.language?.toLowerCase() === t.toLowerCase()
       );
-      if (exact) return { voice: exact.identifier, language: exact.language, available: true };
+      if (matches.length > 0) {
+        // For English, skip en-IN at all costs (we already excluded it from targets,
+        // but be doubly safe in case prefix-match finds it later).
+        if (lang === "en" && t.toLowerCase() === "en-in") continue;
+        const pick = matches.sort(prefer)[0];
+        return { voice: pick.identifier, language: pick.language, available: true };
+      }
     }
-    // partial prefix match
+    // Partial prefix match
     for (const t of targets) {
       const prefix = t.split("-")[0].toLowerCase();
-      const partial = voices.find((v) =>
-        v.language?.toLowerCase().startsWith(prefix)
+      const matches = voices.filter(
+        (v) =>
+          v.language?.toLowerCase().startsWith(prefix) &&
+          // For English, still skip the Indian English voices in fallback
+          !(lang === "en" && v.language?.toLowerCase() === "en-in")
       );
-      if (partial)
-        return { voice: partial.identifier, language: partial.language, available: true };
+      if (matches.length > 0) {
+        const pick = matches.sort(prefer)[0];
+        return { voice: pick.identifier, language: pick.language, available: true };
+      }
     }
-    // none found for desired lang; let the OS pick a default
     return { language: targets[0], available: false };
   } catch {
     return { language: targets[0], available: true };
