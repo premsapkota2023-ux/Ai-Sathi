@@ -254,3 +254,76 @@ class TestTranslateImage:
         spoken = (data.get("spoken_message") or "").strip()
         assert spoken, "spoken_message should be non-empty even for unreadable images"
         assert isinstance(data.get("action_items"), list)
+
+
+# ------------------------------------------------------------
+# /api/transcribe (Whisper)
+# ------------------------------------------------------------
+def _make_english_mp3_b64(phrase: str = "hello good morning") -> str:
+    """Generate a tiny MP3 saying the given phrase using gTTS."""
+    from gtts import gTTS
+    buf = io.BytesIO()
+    tts = gTTS(text=phrase, lang="en")
+    tts.write_to_fp(buf)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+class TestTranscribeAudio:
+    def test_transcribe_english_phrase(self, api_client, base_url):
+        b64 = _make_english_mp3_b64("hello good morning")
+        r = api_client.post(
+            f"{base_url}/api/transcribe",
+            json={"audio_base64": b64, "mime_type": "audio/mpeg", "language": "en"},
+            timeout=120,
+        )
+        assert r.status_code == 200, r.text
+        data = r.json()
+        text = (data.get("text") or "").strip().lower()
+        assert text, f"empty transcript: {data}"
+        # Whisper should pick up at least one of the spoken words
+        assert any(w in text for w in ["hello", "good", "morning"]), f"unexpected transcript: {text}"
+        lang = data.get("language")
+        # Either 'en' or None tolerated per spec
+        assert lang in (None, "en"), f"unexpected language: {lang}"
+        print("Transcribe text =>", text, "| lang =>", lang)
+
+    def test_transcribe_invalid_base64(self, api_client, base_url):
+        r = api_client.post(
+            f"{base_url}/api/transcribe",
+            json={"audio_base64": "@@@not-base64@@@", "mime_type": "audio/mpeg"},
+            timeout=30,
+        )
+        # Backend uses validate=False so garbage may decode to empty/short bytes
+        # → expect 400 (either "Invalid base64 audio" OR "Audio is too short or empty")
+        assert r.status_code == 400, r.text
+
+    def test_transcribe_too_short(self, api_client, base_url):
+        # 100 bytes of zeros → too short
+        b64 = base64.b64encode(b"\x00" * 100).decode("ascii")
+        r = api_client.post(
+            f"{base_url}/api/transcribe",
+            json={"audio_base64": b64, "mime_type": "audio/wav"},
+            timeout=30,
+        )
+        assert r.status_code == 400, r.text
+        assert "short" in r.text.lower() or "empty" in r.text.lower()
+
+    def test_transcribe_oversized(self, api_client, base_url):
+        # 26 MB of zeros → exceeds 25 MB
+        big = b"\x00" * (26 * 1024 * 1024)
+        b64 = base64.b64encode(big).decode("ascii")
+        r = api_client.post(
+            f"{base_url}/api/transcribe",
+            json={"audio_base64": b64, "mime_type": "audio/wav"},
+            timeout=60,
+        )
+        assert r.status_code == 400, r.text
+        assert "25" in r.text or "limit" in r.text.lower() or "exceed" in r.text.lower()
+
+    def test_transcribe_missing_field_returns_422(self, api_client, base_url):
+        r = api_client.post(
+            f"{base_url}/api/transcribe",
+            json={"mime_type": "audio/wav"},  # missing audio_base64
+            timeout=30,
+        )
+        assert r.status_code == 422, r.text

@@ -20,6 +20,13 @@ import { Ionicons } from "@expo/vector-icons";
 import * as Speech from "expo-speech";
 import * as ImagePicker from "expo-image-picker";
 import * as Clipboard from "expo-clipboard";
+import {
+  useAudioRecorder,
+  RecordingPresets,
+  AudioModule,
+  setAudioModeAsync,
+} from "expo-audio";
+import * as FileSystem from "expo-file-system/legacy";
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
 
@@ -241,13 +248,21 @@ export default function Index() {
   const [voiceWarning, setVoiceWarning] = useState<string | null>(null);
   const [autoSpeak, setAutoSpeak] = useState(true);
   const [webCamOpen, setWebCamOpen] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const [recordSeconds, setRecordSeconds] = useState(0);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const recordTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Audio recorder hook (expo-audio)
+  const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
 
   useEffect(() => {
     return () => {
       try {
         Speech.stop();
       } catch {}
+      if (recordTimerRef.current) clearInterval(recordTimerRef.current);
     };
   }, []);
 
@@ -353,6 +368,138 @@ export default function Index() {
     Speech.stop();
     setSpeaking(false);
   }, []);
+
+  // ---------- Voice input (record → Whisper transcribe) ----------
+  const startRecording = useCallback(async () => {
+    try {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      Speech.stop();
+      setSpeaking(false);
+      setError(null);
+      setVoiceWarning(null);
+
+      const perm = await AudioModule.requestRecordingPermissionsAsync();
+      if (!perm.granted) {
+        Alert.alert(
+          "Microphone permission needed",
+          "Please allow microphone access to use voice input."
+        );
+        return;
+      }
+
+      await setAudioModeAsync({
+        playsInSilentMode: true,
+        allowsRecording: true,
+      });
+
+      await audioRecorder.prepareToRecordAsync();
+      audioRecorder.record();
+      setIsRecording(true);
+      setRecordSeconds(0);
+      recordTimerRef.current = setInterval(() => {
+        setRecordSeconds((s) => {
+          // hard cap at 60s
+          if (s >= 59) {
+            stopRecording();
+            return 60;
+          }
+          return s + 1;
+        });
+      }, 1000);
+    } catch (e: any) {
+      setIsRecording(false);
+      Alert.alert("Recording error", e?.message || "Could not start recording");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [audioRecorder]);
+
+  const stopRecording = useCallback(async () => {
+    if (recordTimerRef.current) {
+      clearInterval(recordTimerRef.current);
+      recordTimerRef.current = null;
+    }
+    setIsRecording(false);
+    setTranscribing(true);
+    try {
+      await audioRecorder.stop();
+      const uri = audioRecorder.uri;
+      if (!uri) {
+        throw new Error("No audio recorded");
+      }
+
+      // Read recorded file as base64
+      let base64 = "";
+      let mime = Platform.OS === "web" ? "audio/webm" : "audio/m4a";
+      if (Platform.OS === "web") {
+        // On web, uri is a blob: URL
+        const resp = await fetch(uri);
+        const blob = await resp.blob();
+        mime = blob.type || mime;
+        base64 = await new Promise<string>((resolve, reject) => {
+          // @ts-ignore
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const result = (reader.result as string) || "";
+            const idx = result.indexOf(",");
+            resolve(idx >= 0 ? result.slice(idx + 1) : result);
+          };
+          reader.onerror = () => reject(new Error("Failed to read audio blob"));
+          reader.readAsDataURL(blob);
+        });
+      } else {
+        base64 = await FileSystem.readAsStringAsync(uri, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+      }
+
+      const res = await fetch(`${BACKEND_URL}/api/transcribe`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          audio_base64: base64,
+          mime_type: mime,
+          language: sourceLang,
+        }),
+      });
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(t || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      const text = (data.text || "").trim();
+      if (!text) {
+        setError("Could not understand the audio. Please try speaking again.");
+        return;
+      }
+      // Trust user's selected source language; use Whisper's detection only as a hint.
+      const detected: Lang | null =
+        data.language === "en" || data.language === "ne" ? data.language : null;
+      let actualSrc: Lang = sourceLang;
+      let actualTgt: Lang = targetLang;
+      if (detected && detected !== sourceLang) {
+        actualSrc = detected;
+        actualTgt = detected === "en" ? "ne" : "en";
+        setSourceLang(actualSrc);
+        setTargetLang(actualTgt);
+      }
+      setSourceText(text);
+      // Auto-translate the transcribed text and speak
+      callTranslate(text, actualSrc, actualTgt, true);
+    } catch (e: any) {
+      setError(e?.message || "Could not transcribe audio");
+    } finally {
+      setTranscribing(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [audioRecorder, sourceLang, targetLang, callTranslate]);
+
+  const toggleRecording = useCallback(() => {
+    if (isRecording) {
+      stopRecording();
+    } else {
+      startRecording();
+    }
+  }, [isRecording, startRecording, stopRecording]);
 
   const handleSpeakOutput = useCallback(() => {
     if (speaking) {
@@ -569,7 +716,26 @@ export default function Index() {
         <Pressable onPress={Keyboard.dismiss} style={styles.workspace}>
           {/* Source input */}
           <View style={styles.inputCard}>
-            <Text style={styles.cardLabel}>{LANG_LABEL[sourceLang]}</Text>
+            <View style={styles.inputHeader}>
+              <Text style={styles.cardLabel}>{LANG_LABEL[sourceLang]}</Text>
+              {(isRecording || transcribing) && (
+                <View style={styles.recordingPill}>
+                  {isRecording ? (
+                    <>
+                      <View style={styles.recordingDot} />
+                      <Text style={styles.recordingText}>
+                        Recording  {recordSeconds}s
+                      </Text>
+                    </>
+                  ) : (
+                    <>
+                      <ActivityIndicator size="small" color="#D95D39" />
+                      <Text style={styles.recordingText}>Transcribing…</Text>
+                    </>
+                  )}
+                </View>
+              )}
+            </View>
             <ScrollView
               style={styles.scroll}
               keyboardShouldPersistTaps="handled"
@@ -604,15 +770,24 @@ export default function Index() {
                 )}
                 <TouchableOpacity
                   testID="speak-source-button"
-                  onPress={() => performSpeak(sourceText, sourceLang)}
-                  disabled={!sourceText.trim()}
+                  onPress={toggleRecording}
+                  disabled={transcribing || loading || imageBusy}
                   style={[
                     styles.iconGhost,
-                    !sourceText.trim() && { opacity: 0.4 },
+                    isRecording && styles.iconRecording,
+                    (transcribing || loading || imageBusy) && { opacity: 0.4 },
                   ]}
                   activeOpacity={0.7}
                 >
-                  <Ionicons name="mic-outline" size={18} color="#57534E" />
+                  {transcribing ? (
+                    <ActivityIndicator size="small" color="#D95D39" />
+                  ) : (
+                    <Ionicons
+                      name={isRecording ? "stop" : "mic"}
+                      size={18}
+                      color={isRecording ? "#fff" : "#D95D39"}
+                    />
+                  )}
                 </TouchableOpacity>
                 <TouchableOpacity
                   testID="translate-now-button"
@@ -861,6 +1036,33 @@ const styles = StyleSheet.create({
     borderColor: "#EFECE6",
     minHeight: 140,
   },
+  inputHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 6,
+  },
+  recordingPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: "rgba(217,93,57,0.1)",
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 999,
+  },
+  recordingDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: "#D95D39",
+  },
+  recordingText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#D95D39",
+    letterSpacing: 0.4,
+  },
   outputCard: {
     flex: 1.1,
     backgroundColor: "#F4F1EA",
@@ -922,6 +1124,9 @@ const styles = StyleSheet.create({
     borderRadius: 18,
     alignItems: "center",
     justifyContent: "center",
+  },
+  iconRecording: {
+    backgroundColor: "#D95D39",
   },
   translateBtn: {
     flexDirection: "row",

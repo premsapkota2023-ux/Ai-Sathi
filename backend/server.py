@@ -12,13 +12,15 @@ from pydantic import BaseModel, Field
 from typing import Optional
 
 from emergentintegrations.llm.chat import LlmChat, UserMessage, FileContentWithMimeType
+from emergentintegrations.llm.openai import OpenAISpeechToText
 
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY", "")
-GEMINI_MODEL = "gemini-2.5-pro"
+# Use gemini-2.5-flash for speed (translation + vision OCR).
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 # Create the main app without a prefix
 app = FastAPI(title="AI Sathi - English Nepali Translator")
@@ -54,6 +56,17 @@ class ImageTranslateResponse(BaseModel):
     summary: str = ""
     spoken_message: str = ""
     action_items: list[str] = []
+
+
+class TranscribeRequest(BaseModel):
+    audio_base64: str = Field(..., description="Base64 encoded audio (no data: prefix)")
+    mime_type: str = Field(default="audio/m4a")
+    language: Optional[str] = Field(default=None, description="ISO-639-1 hint, e.g. 'ne' or 'en'. Optional.")
+
+
+class TranscribeResponse(BaseModel):
+    text: str
+    language: Optional[str] = None
 
 
 # ---------- Helpers ----------
@@ -270,6 +283,86 @@ async def translate_image(req: ImageTranslateRequest):
     except Exception as e:
         logging.exception("translate-image failed")
         raise HTTPException(status_code=500, detail=f"Image translation failed: {str(e)}")
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except Exception:
+            pass
+
+
+# ---------- Speech-to-Text (Whisper) ----------
+@api_router.post("/transcribe", response_model=TranscribeResponse)
+async def transcribe_audio(req: TranscribeRequest):
+    if not EMERGENT_LLM_KEY:
+        raise HTTPException(status_code=500, detail="EMERGENT_LLM_KEY not configured")
+
+    mime = (req.mime_type or "audio/m4a").lower()
+    # OpenAI Whisper supports: mp3, mp4, mpeg, mpga, m4a, wav, webm
+    ext_map = {
+        "audio/mpeg": ".mp3",
+        "audio/mp3": ".mp3",
+        "audio/mp4": ".mp4",
+        "audio/m4a": ".m4a",
+        "audio/x-m4a": ".m4a",
+        "audio/wav": ".wav",
+        "audio/x-wav": ".wav",
+        "audio/webm": ".webm",
+        "audio/ogg": ".webm",
+    }
+    suffix = ext_map.get(mime, ".m4a")
+
+    b64 = (req.audio_base64 or "").strip()
+    if b64.startswith("data:"):
+        try:
+            b64 = b64.split(",", 1)[1]
+        except Exception:
+            pass
+    try:
+        raw = base64.b64decode(b64, validate=False)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid base64 audio")
+
+    if len(raw) < 500:
+        raise HTTPException(status_code=400, detail="Audio is too short or empty")
+    if len(raw) > 25 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Audio exceeds 25 MB limit")
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    try:
+        tmp.write(raw)
+        tmp.flush()
+        tmp.close()
+
+        stt = OpenAISpeechToText(api_key=EMERGENT_LLM_KEY)
+        kwargs = {
+            "model": "whisper-1",
+            "response_format": "verbose_json",
+            "temperature": 0.0,
+        }
+        if req.language and req.language.lower() in {"en", "ne"}:
+            kwargs["language"] = req.language.lower()
+
+        with open(tmp.name, "rb") as audio_file:
+            response = await stt.transcribe(file=audio_file, **kwargs)
+
+        text = (getattr(response, "text", None) or "").strip()
+        detected_lang = getattr(response, "language", None)
+        # Whisper returns language as ISO code (e.g., 'english', 'nepali' or 'en'/'ne' depending on version)
+        if detected_lang:
+            dl = str(detected_lang).lower()
+            if dl.startswith("ne") or "nepali" in dl:
+                detected_lang = "ne"
+            elif dl.startswith("en") or "english" in dl:
+                detected_lang = "en"
+            else:
+                detected_lang = None
+
+        return TranscribeResponse(text=text, language=detected_lang)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.exception("transcribe failed")
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
     finally:
         try:
             os.unlink(tmp.name)

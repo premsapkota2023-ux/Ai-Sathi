@@ -12,7 +12,8 @@
       "supportsTablet": true,
       "infoPlist": {
         "NSCameraUsageDescription": "Capture photos to translate text in images",
-        "NSPhotoLibraryUsageDescription": "Pick photos to translate text in images"
+        "NSPhotoLibraryUsageDescription": "Pick photos to translate text in images",
+        "NSMicrophoneUsageDescription": "Record your voice to transcribe and translate"
       }
     },
     "android": {
@@ -24,7 +25,8 @@
       "permissions": [
         "android.permission.CAMERA",
         "android.permission.READ_MEDIA_IMAGES",
-        "android.permission.READ_EXTERNAL_STORAGE"
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.RECORD_AUDIO"
       ]
     },
     "web": {
@@ -49,6 +51,12 @@
         {
           "photosPermission": "Pick photos to translate text in images",
           "cameraPermission": "Capture photos to translate text in images"
+        }
+      ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Record your voice to transcribe and translate"
         }
       ]
     ],
