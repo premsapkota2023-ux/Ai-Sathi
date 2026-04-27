@@ -1,0 +1,46 @@
+{
+  "summary": "Iteration 2 testing for AI Sathi (auto-speak chip, document summary + action items, web camera modal). Backend: 12/12 pytest cases passing including new bill summary, simple-text spoken_message, and pure-noise polite-fallback scenarios. Frontend: all critical flows verified on mobile viewport (auto-speak toggle ON↔OFF, debounced EN→NE translation, play/stop button label, copy-clipboard, language swap, translate-now, gallery upload no-crash, reset clears state, web camera modal opens with graceful error UI when no camera, close button dismisses modal).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "index",
+        "issues": [
+          "Non-blocking RN-web deprecation warnings still in console: 'shadow*' style props (use boxShadow), TouchableWithoutFeedback (use Pressable), props.pointerEvents (use style.pointerEvents). Same as iteration 1."
+        ]
+      }
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_translator_api.py",
+    "/app/backend/tests/conftest.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "(Optional, non-blocking) Silence RN-web deprecation warnings — does not affect functionality."
+  ],
+  "critical_code_review_comments": [
+    "server.py /api/translate-image: 3-step pipeline (OCR→translate→summarize) is well-structured. JSON parsing strips ```json fences and falls back to translation when summary JSON parse fails — robust.",
+    "Bill PNG test confirmed: summary='यो एक्सवाइजेड पानी कम्पनीको पानीको बिल हो।', spoken_message includes amount ($50) + due date (Dec 15 2026) in Nepali, action_items=['डिसेम्बर १५, २०२६ सम्ममा ५० डलर तिर्नुहोस्।'].",
+    "Pure-noise image returns 200 with non-empty spoken_message (no 500) — handled correctly.",
+    "index.tsx: auto-speak toggle properly gates speakAfter only on translate-now (typing debounce never auto-speaks). Good UX.",
+    "index.tsx: WebCameraModal snap button is conditionally rendered only when stream is ready & no error — correct branching; error UI shows 'Could not access camera' and close button is always present.",
+    "index.tsx: handleSpeakOutput prefers summary when available, else translated_text — matches spec where summary is the headline output.",
+    "index.tsx: pickVoiceOptions correctly returns available:false when no Nepali voice exists, surfaces voiceWarning in UI."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_translator_api.py (added 3 new tests: bill summary, simple-text spoken_message, pure-noise polite-fallback)"
+  ],
+  "success_rate": {"backend": "100% (12/12)", "frontend": "100% (all specified iteration-2 flows)"},
+  "seed_data_creation": "None — backend is stateless. Test images generated in-memory via PIL (water-bill PNG, HELLO WORLD PNG, random-noise PNG).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Backend public URL: https://nepali-ocr-speak.preview.emergentagent.com. Bill image test takes ~30-50s due to 3 sequential Gemini calls (OCR + translate + summarize); use timeout>=120s. Test helpers in test_translator_api.py: _make_bill_png_b64(), _make_text_png_b64(), _make_noise_png_b64(). Frontend testIDs verified: app-header-logo, auto-speak-toggle, language-swap-button, source-text-input, translate-now-button, translated-text-output, play-audio-button, copy-clipboard-button, gallery-upload-button, camera-capture-button, web-camera-snap (only when camera ready), web-camera-close (always when modal open), reset-app-button, clear-text-button, speak-source-button. Web camera modal: in headless browser the snap button is NOT rendered because getUserMedia fails; instead the cameraError view shows 'Could not access camera' which is the intended graceful fallback.",
+  "rca_of_issue": "No issues found. Pipeline EN-bill→Nepali summary+actions works end-to-end. Auto-speak chip toggles correctly. Web camera modal handles permission/no-camera errors gracefully without JS crash."
+}

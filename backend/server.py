@@ -51,6 +51,9 @@ class ImageTranslateResponse(BaseModel):
     translated_text: str
     detected_lang: Optional[str] = None
     target_lang: str
+    summary: str = ""
+    spoken_message: str = ""
+    action_items: list[str] = []
 
 
 # ---------- Helpers ----------
@@ -186,6 +189,11 @@ async def translate_image(req: ImageTranslateRequest):
                 translated_text="",
                 detected_lang=detected if detected in {"en", "ne"} else None,
                 target_lang=tgt,
+                summary="",
+                spoken_message=("कुनै पाठ भेटिएन। कृपया स्पष्ट तस्बिर खिच्नुहोस्।"
+                                if tgt == "ne"
+                                else "No readable text found. Please try a clearer photo."),
+                action_items=[],
             )
 
         # Determine source language: trust model; otherwise infer by script presence
@@ -195,28 +203,67 @@ async def translate_image(req: ImageTranslateRequest):
 
         # Step 2: translate to target if different
         if detected == tgt:
-            return ImageTranslateResponse(
-                extracted_text=ocr_text,
-                translated_text=ocr_text,
-                detected_lang=detected,
-                target_lang=tgt,
+            translated = ocr_text
+        else:
+            translate_system = (
+                f"You are an expert translator between English and Nepali. "
+                f"Translate from {LANG_NAMES[detected]} to {LANG_NAMES[tgt]}. "
+                f"Output ONLY the translated text. No explanations or quotes. "
+                f"Preserve line breaks."
             )
+            t_chat = _build_chat(translate_system)
+            t_resp = await t_chat.send_message(UserMessage(text=ocr_text))
+            translated = (t_resp or "").strip()
 
-        translate_system = (
-            f"You are an expert translator between English and Nepali. "
-            f"Translate from {LANG_NAMES[detected]} to {LANG_NAMES[tgt]}. "
-            f"Output ONLY the translated text. No explanations or quotes. "
-            f"Preserve line breaks."
+        # Step 3: Summarize + extract action items as a single voice-friendly message
+        target_label = LANG_NAMES[tgt]
+        summary_system = (
+            f"You are an assistant helping a {target_label} speaker who may not "
+            f"read {target_label} well and needs information by voice. The user "
+            f"photographed a document (could be a bill, letter, receipt, sign, "
+            f"prescription, notice, etc.). Read the document carefully and "
+            f"produce a short, plain-spoken explanation in {target_label} that:\n"
+            f"  - Identifies what kind of document it is (bill, notice, receipt, etc.)\n"
+            f"  - States the most important facts: who it is from, amounts, dates, deadlines, account numbers if relevant.\n"
+            f"  - Lists any actions the person must take (pay $X by Y date, call number, reply by date, etc.).\n"
+            f"  - Sounds natural when read aloud (no bullet points, no markdown, no labels).\n\n"
+            f"Return STRICT JSON of the form:\n"
+            '{"summary": "<one short sentence in ' + target_label + ' describing the document>", '
+            '"spoken_message": "<2-4 short sentences in ' + target_label + ' suitable for text-to-speech>", '
+            '"action_items": ["<short action 1 in ' + target_label + '>", "..."]}\n\n'
+            f"If the document has no actions required, return an empty action_items list. "
+            f"Output ONLY the JSON object, no markdown, no commentary."
         )
-        t_chat = _build_chat(translate_system)
-        t_resp = await t_chat.send_message(UserMessage(text=ocr_text))
-        translated = (t_resp or "").strip()
+
+        summary_obj = {"summary": "", "spoken_message": translated, "action_items": []}
+        try:
+            s_chat = _build_chat(summary_system)
+            s_input = (
+                f"Original document text ({LANG_NAMES[detected]}):\n{ocr_text}\n\n"
+                f"Translation ({target_label}):\n{translated}"
+            )
+            s_resp = await s_chat.send_message(UserMessage(text=s_input))
+            if s_resp:
+                cleaned = s_resp.strip()
+                cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.MULTILINE).strip()
+                parsed = json.loads(cleaned)
+                summary_obj["summary"] = (parsed.get("summary") or "").strip()
+                spoken = (parsed.get("spoken_message") or "").strip()
+                if spoken:
+                    summary_obj["spoken_message"] = spoken
+                items = parsed.get("action_items") or []
+                summary_obj["action_items"] = [str(i).strip() for i in items if str(i).strip()]
+        except Exception:
+            logging.exception("summary generation failed; using translation as fallback")
 
         return ImageTranslateResponse(
             extracted_text=ocr_text,
             translated_text=translated,
             detected_lang=detected,
             target_lang=tgt,
+            summary=summary_obj["summary"],
+            spoken_message=summary_obj["spoken_message"],
+            action_items=summary_obj["action_items"],
         )
     except HTTPException:
         raise

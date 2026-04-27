@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, useRef } from "react";
+import React, { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import {
   Text,
   View,
@@ -11,8 +11,8 @@ import {
   Platform,
   Alert,
   Keyboard,
-  TouchableWithoutFeedback,
-  Image,
+  Pressable,
+  Modal,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
@@ -30,26 +30,243 @@ const LANG_LABEL: Record<Lang, string> = {
   ne: "नेपाली",
 };
 
-const SPEECH_LOCALE: Record<Lang, string> = {
-  en: "en-US",
-  ne: "ne-NP",
-};
-
 const PLACEHOLDER: Record<Lang, string> = {
   en: "Type something to translate…",
   ne: "अनुवाद गर्न केहि लेख्नुहोस्…",
 };
+
+// Choose best available voice for a language.
+// Returns either { language } (default behaviour) or { voice } when an exact
+// voice id is found. Falls back to the closest matching language code if the
+// device doesn't have the exact locale (common for Nepali on iOS / web).
+async function pickVoiceOptions(lang: Lang): Promise<{
+  language?: string;
+  voice?: string;
+  available: boolean;
+}> {
+  const targets =
+    lang === "ne"
+      ? ["ne-NP", "ne-IN", "ne", "hi-IN", "hi"]
+      : ["en-US", "en-GB", "en-IN", "en"];
+  try {
+    const voices = await Speech.getAvailableVoicesAsync();
+    if (!voices || voices.length === 0) {
+      return { language: targets[0], available: true };
+    }
+    for (const t of targets) {
+      const exact = voices.find(
+        (v) => v.language?.toLowerCase() === t.toLowerCase()
+      );
+      if (exact) return { voice: exact.identifier, language: exact.language, available: true };
+    }
+    // partial prefix match
+    for (const t of targets) {
+      const prefix = t.split("-")[0].toLowerCase();
+      const partial = voices.find((v) =>
+        v.language?.toLowerCase().startsWith(prefix)
+      );
+      if (partial)
+        return { voice: partial.identifier, language: partial.language, available: true };
+    }
+    // none found for desired lang; let the OS pick a default
+    return { language: targets[0], available: false };
+  } catch {
+    return { language: targets[0], available: true };
+  }
+}
+
+async function speakText(text: string, lang: Lang, onDone?: () => void) {
+  if (!text || !text.trim()) {
+    onDone?.();
+    return;
+  }
+  try {
+    Speech.stop();
+  } catch {}
+  const opts = await pickVoiceOptions(lang);
+  Speech.speak(text, {
+    language: opts.language,
+    voice: opts.voice,
+    rate: 0.95,
+    pitch: 1.0,
+    onDone: () => onDone?.(),
+    onStopped: () => onDone?.(),
+    onError: () => onDone?.(),
+  });
+  return opts.available;
+}
+
+// ---------- Web camera modal (desktop browsers) ----------
+function WebCameraModal({
+  visible,
+  onClose,
+  onCapture,
+}: {
+  visible: boolean;
+  onClose: () => void;
+  onCapture: (base64: string, mime: string) => void;
+}) {
+  const videoContainerRef = useRef<View | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const videoElRef = useRef<HTMLVideoElement | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    if (!visible || Platform.OS !== "web") return;
+    let cancelled = false;
+    setError(null);
+    setReady(false);
+
+    (async () => {
+      try {
+        // @ts-ignore - DOM only on web
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "environment" },
+          audio: false,
+        });
+        if (cancelled) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+        streamRef.current = stream;
+        // @ts-ignore
+        const containerEl = videoContainerRef.current as unknown as HTMLElement;
+        if (!containerEl) return;
+        // @ts-ignore
+        const video = document.createElement("video");
+        video.autoplay = true;
+        video.playsInline = true;
+        video.muted = true;
+        video.style.width = "100%";
+        video.style.height = "100%";
+        video.style.objectFit = "cover";
+        video.style.borderRadius = "16px";
+        video.srcObject = stream;
+        // @ts-ignore
+        containerEl.innerHTML = "";
+        // @ts-ignore
+        containerEl.appendChild(video);
+        videoElRef.current = video;
+        await video.play();
+        setReady(true);
+      } catch (e: any) {
+        setError(e?.message || "Could not access camera");
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
+      }
+      videoElRef.current = null;
+    };
+  }, [visible]);
+
+  const handleSnap = useCallback(() => {
+    if (Platform.OS !== "web") return;
+    const v = videoElRef.current;
+    if (!v) return;
+    // @ts-ignore
+    const canvas = document.createElement("canvas");
+    canvas.width = v.videoWidth || 1280;
+    canvas.height = v.videoHeight || 720;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+    const b64 = dataUrl.split(",")[1] || "";
+    onCapture(b64, "image/jpeg");
+  }, [onCapture]);
+
+  if (Platform.OS !== "web") return null;
+
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <View style={styles.modalBackdrop}>
+        <View style={styles.cameraSheet}>
+          <View style={styles.cameraHeader}>
+            <Text style={styles.cameraTitle}>Take a photo</Text>
+            <TouchableOpacity onPress={onClose} style={styles.cameraClose} testID="web-camera-close">
+              <Ionicons name="close" size={22} color="#1C1917" />
+            </TouchableOpacity>
+          </View>
+          {error ? (
+            <View style={styles.cameraError}>
+              <Ionicons name="alert-circle-outline" size={32} color="#B0341A" />
+              <Text style={styles.cameraErrorText}>{error}</Text>
+              <Text style={styles.cameraErrorHint}>
+                Allow camera permission in your browser, or use the gallery button instead.
+              </Text>
+            </View>
+          ) : (
+            <>
+              <View ref={videoContainerRef as any} style={styles.cameraVideo} />
+              {!ready && (
+                <View style={styles.cameraLoading}>
+                  <ActivityIndicator color="#D95D39" />
+                  <Text style={styles.cameraLoadingText}>Starting camera…</Text>
+                </View>
+              )}
+              <TouchableOpacity
+                style={styles.snapButton}
+                onPress={handleSnap}
+                disabled={!ready}
+                activeOpacity={0.85}
+                testID="web-camera-snap"
+              >
+                <View style={styles.snapInner} />
+              </TouchableOpacity>
+            </>
+          )}
+        </View>
+      </View>
+    </Modal>
+  );
+}
 
 export default function Index() {
   const [sourceLang, setSourceLang] = useState<Lang>("en");
   const [targetLang, setTargetLang] = useState<Lang>("ne");
   const [sourceText, setSourceText] = useState("");
   const [translated, setTranslated] = useState("");
+  const [summary, setSummary] = useState("");
+  const [actionItems, setActionItems] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [imageBusy, setImageBusy] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [voiceWarning, setVoiceWarning] = useState<string | null>(null);
+  const [autoSpeak, setAutoSpeak] = useState(true);
+  const [webCamOpen, setWebCamOpen] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      try {
+        Speech.stop();
+      } catch {}
+    };
+  }, []);
+
+  const performSpeak = useCallback(
+    async (text: string, lang: Lang) => {
+      if (!text.trim()) return;
+      setSpeaking(true);
+      setVoiceWarning(null);
+      const available = await speakText(text, lang, () => setSpeaking(false));
+      if (available === false) {
+        setVoiceWarning(
+          lang === "ne"
+            ? "No Nepali voice installed on this device — using a fallback voice."
+            : "No matching English voice — using a fallback voice."
+        );
+      }
+    },
+    []
+  );
 
   const swapLangs = useCallback(() => {
     setSourceLang((s) => {
@@ -59,11 +276,13 @@ export default function Index() {
     });
     setSourceText(translated);
     setTranslated(sourceText);
+    setSummary("");
+    setActionItems([]);
     setError(null);
   }, [sourceText, translated]);
 
   const callTranslate = useCallback(
-    async (text: string, src: Lang, tgt: Lang) => {
+    async (text: string, src: Lang, tgt: Lang, speakAfter: boolean) => {
       if (!text.trim()) {
         setTranslated("");
         return;
@@ -81,7 +300,13 @@ export default function Index() {
           throw new Error(t || `HTTP ${res.status}`);
         }
         const data = await res.json();
-        setTranslated(data.translated_text || "");
+        const out = data.translated_text || "";
+        setTranslated(out);
+        setSummary("");
+        setActionItems([]);
+        if (speakAfter && autoSpeak && out) {
+          performSpeak(out, tgt);
+        }
       } catch (e: any) {
         setError(e?.message || "Translation failed");
         setTranslated("");
@@ -89,7 +314,7 @@ export default function Index() {
         setLoading(false);
       }
     },
-    []
+    [autoSpeak, performSpeak]
   );
 
   const handleSourceChange = useCallback(
@@ -98,12 +323,15 @@ export default function Index() {
       if (debounceRef.current) clearTimeout(debounceRef.current);
       if (!text.trim()) {
         setTranslated("");
+        setSummary("");
+        setActionItems([]);
         setError(null);
         return;
       }
+      // debounced silent translate (no auto-speak while typing)
       debounceRef.current = setTimeout(() => {
-        callTranslate(text, sourceLang, targetLang);
-      }, 600);
+        callTranslate(text, sourceLang, targetLang, false);
+      }, 700);
     },
     [callTranslate, sourceLang, targetLang]
   );
@@ -111,47 +339,47 @@ export default function Index() {
   const handleTranslateNow = useCallback(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
     Keyboard.dismiss();
-    callTranslate(sourceText, sourceLang, targetLang);
+    callTranslate(sourceText, sourceLang, targetLang, true);
   }, [callTranslate, sourceText, sourceLang, targetLang]);
 
   const handleClear = useCallback(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
     setSourceText("");
     setTranslated("");
+    setSummary("");
+    setActionItems([]);
     setError(null);
+    setVoiceWarning(null);
     Speech.stop();
     setSpeaking(false);
   }, []);
 
-  const handleSpeak = useCallback(() => {
-    if (!translated.trim()) return;
+  const handleSpeakOutput = useCallback(() => {
     if (speaking) {
       Speech.stop();
       setSpeaking(false);
       return;
     }
-    setSpeaking(true);
-    Speech.speak(translated, {
-      language: SPEECH_LOCALE[targetLang],
-      rate: 0.95,
-      pitch: 1.0,
-      onDone: () => setSpeaking(false),
-      onStopped: () => setSpeaking(false),
-      onError: () => setSpeaking(false),
-    });
-  }, [translated, speaking, targetLang]);
+    // Prefer the spoken summary message (if from image) else the translation
+    const text = summary || translated;
+    if (!text.trim()) return;
+    performSpeak(text, targetLang);
+  }, [speaking, summary, translated, targetLang, performSpeak]);
 
   const handleCopy = useCallback(async () => {
-    if (!translated) return;
-    await Clipboard.setStringAsync(translated);
-    if (Platform.OS === "web") return; // silent on web
-    Alert.alert("Copied", "Translated text copied to clipboard.");
-  }, [translated]);
+    const text = summary || translated;
+    if (!text) return;
+    await Clipboard.setStringAsync(text);
+    if (Platform.OS === "web") return;
+    Alert.alert("Copied", "Text copied to clipboard.");
+  }, [translated, summary]);
 
   const processImage = useCallback(
     async (base64: string, mime: string) => {
       setImageBusy(true);
       setError(null);
+      setSummary("");
+      setActionItems([]);
       try {
         const res = await fetch(`${BACKEND_URL}/api/translate-image`, {
           method: "POST",
@@ -174,24 +402,43 @@ export default function Index() {
             : undefined;
 
         if (!extracted) {
-          setError("No readable text found in the image.");
+          setError("No readable text found in the image. Please try a clearer photo.");
+          setTranslated("");
+          if (autoSpeak) {
+            performSpeak(
+              targetLang === "ne"
+                ? "कुनै पाठ भेटिएन। कृपया स्पष्ट तस्बिर खिच्नुहोस्।"
+                : "No readable text found. Please try a clearer photo.",
+              targetLang
+            );
+          }
           return;
         }
 
-        // Sync UI: source = detected lang + extracted text, output = translated
         if (detected) {
           setSourceLang(detected);
           setTargetLang(detected === "en" ? "ne" : "en");
         }
         setSourceText(extracted);
-        setTranslated((data.translated_text || "").trim());
+        const t = (data.translated_text || "").trim();
+        const s = (data.summary || "").trim();
+        const sm = (data.spoken_message || t).trim();
+        const items: string[] = Array.isArray(data.action_items)
+          ? data.action_items.filter((x: any) => typeof x === "string" && x.trim())
+          : [];
+        setTranslated(t);
+        setSummary(s);
+        setActionItems(items);
+        if (autoSpeak && sm) {
+          performSpeak(sm, (detected === "en" ? "ne" : detected === "ne" ? "en" : targetLang) as Lang);
+        }
       } catch (e: any) {
         setError(e?.message || "Image translation failed");
       } finally {
         setImageBusy(false);
       }
     },
-    [targetLang]
+    [targetLang, autoSpeak, performSpeak]
   );
 
   const pickFromGallery = useCallback(async () => {
@@ -202,7 +449,7 @@ export default function Index() {
         return;
       }
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        mediaTypes: ["images"],
         quality: 0.8,
         base64: true,
         allowsEditing: false,
@@ -221,6 +468,10 @@ export default function Index() {
   }, [processImage]);
 
   const captureWithCamera = useCallback(async () => {
+    if (Platform.OS === "web") {
+      setWebCamOpen(true);
+      return;
+    }
     try {
       const perm = await ImagePicker.requestCameraPermissionsAsync();
       if (!perm.granted) {
@@ -245,10 +496,20 @@ export default function Index() {
     }
   }, [processImage]);
 
-  const showEmptyState = useMemo(
-    () => !sourceText && !translated && !loading && !imageBusy,
-    [sourceText, translated, loading, imageBusy]
+  const handleWebCapture = useCallback(
+    (b64: string, mime: string) => {
+      setWebCamOpen(false);
+      processImage(b64, mime);
+    },
+    [processImage]
   );
+
+  const showEmptyState = useMemo(
+    () => !sourceText && !translated && !loading && !imageBusy && !error,
+    [sourceText, translated, loading, imageBusy, error]
+  );
+
+  const hasOutput = !!(translated || summary);
 
   return (
     <SafeAreaView style={styles.safe} edges={["top", "left", "right"]}>
@@ -256,17 +517,34 @@ export default function Index() {
       <KeyboardAvoidingView
         behavior={Platform.OS === "ios" ? "padding" : undefined}
         style={styles.flex}
-        keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 0}
       >
         {/* Header */}
         <View style={styles.header} testID="app-header-logo">
           <Text style={styles.brand}>
             AI Sathi<Text style={styles.brandDot}>.</Text>
           </Text>
-          <Text style={styles.tagline}>English ↔ नेपाली</Text>
+          <Pressable
+            onPress={() => setAutoSpeak((v) => !v)}
+            style={styles.autoSpeakChip}
+            testID="auto-speak-toggle"
+          >
+            <Ionicons
+              name={autoSpeak ? "volume-high" : "volume-mute"}
+              size={14}
+              color={autoSpeak ? "#2B593F" : "#A8A29E"}
+            />
+            <Text
+              style={[
+                styles.autoSpeakText,
+                { color: autoSpeak ? "#2B593F" : "#A8A29E" },
+              ]}
+            >
+              {autoSpeak ? "Auto-speak ON" : "Auto-speak OFF"}
+            </Text>
+          </Pressable>
         </View>
 
-        {/* Language selector pill */}
+        {/* Language pill */}
         <View style={styles.langPillWrap}>
           <View style={styles.langPill}>
             <View style={styles.langSide}>
@@ -288,134 +566,183 @@ export default function Index() {
           </View>
         </View>
 
-        {/* Workspace */}
-        <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
-          <View style={styles.workspace}>
-            {/* Source input card */}
-            <View style={styles.inputCard}>
-              <Text style={styles.cardLabel}>{LANG_LABEL[sourceLang]}</Text>
-              <ScrollView
-                style={styles.scroll}
-                keyboardShouldPersistTaps="handled"
-                showsVerticalScrollIndicator={false}
-              >
-                <TextInput
-                  testID="source-text-input"
-                  style={styles.textInput}
-                  multiline
-                  value={sourceText}
-                  onChangeText={handleSourceChange}
-                  placeholder={PLACEHOLDER[sourceLang]}
-                  placeholderTextColor="#A8A29E"
-                  maxLength={5000}
-                  autoCorrect
-                  autoCapitalize="sentences"
-                  textAlignVertical="top"
-                />
-              </ScrollView>
-              <View style={styles.utilityRow}>
-                <Text style={styles.charCount}>{sourceText.length}/5000</Text>
-                <View style={styles.utilityActions}>
-                  {sourceText.length > 0 && (
-                    <TouchableOpacity
-                      testID="clear-text-button"
-                      onPress={handleClear}
-                      style={styles.iconGhost}
-                      activeOpacity={0.7}
-                    >
-                      <Ionicons name="close" size={18} color="#A8A29E" />
-                    </TouchableOpacity>
-                  )}
+        <Pressable onPress={Keyboard.dismiss} style={styles.workspace}>
+          {/* Source input */}
+          <View style={styles.inputCard}>
+            <Text style={styles.cardLabel}>{LANG_LABEL[sourceLang]}</Text>
+            <ScrollView
+              style={styles.scroll}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
+              <TextInput
+                testID="source-text-input"
+                style={styles.textInput}
+                multiline
+                value={sourceText}
+                onChangeText={handleSourceChange}
+                placeholder={PLACEHOLDER[sourceLang]}
+                placeholderTextColor="#A8A29E"
+                maxLength={5000}
+                autoCorrect
+                autoCapitalize="sentences"
+                textAlignVertical="top"
+              />
+            </ScrollView>
+            <View style={styles.utilityRow}>
+              <Text style={styles.charCount}>{sourceText.length}/5000</Text>
+              <View style={styles.utilityActions}>
+                {sourceText.length > 0 && (
                   <TouchableOpacity
-                    testID="translate-now-button"
-                    onPress={handleTranslateNow}
-                    disabled={!sourceText.trim() || loading}
-                    style={[
-                      styles.translateBtn,
-                      (!sourceText.trim() || loading) && styles.translateBtnDisabled,
-                    ]}
-                    activeOpacity={0.8}
+                    testID="clear-text-button"
+                    onPress={handleClear}
+                    style={styles.iconGhost}
+                    activeOpacity={0.7}
                   >
-                    <Ionicons name="arrow-forward" size={16} color="#fff" />
-                    <Text style={styles.translateBtnText}>Translate</Text>
+                    <Ionicons name="close" size={18} color="#A8A29E" />
                   </TouchableOpacity>
-                </View>
+                )}
+                <TouchableOpacity
+                  testID="speak-source-button"
+                  onPress={() => performSpeak(sourceText, sourceLang)}
+                  disabled={!sourceText.trim()}
+                  style={[
+                    styles.iconGhost,
+                    !sourceText.trim() && { opacity: 0.4 },
+                  ]}
+                  activeOpacity={0.7}
+                >
+                  <Ionicons name="mic-outline" size={18} color="#57534E" />
+                </TouchableOpacity>
+                <TouchableOpacity
+                  testID="translate-now-button"
+                  onPress={handleTranslateNow}
+                  disabled={!sourceText.trim() || loading}
+                  style={[
+                    styles.translateBtn,
+                    (!sourceText.trim() || loading) && styles.translateBtnDisabled,
+                  ]}
+                  activeOpacity={0.85}
+                >
+                  <Ionicons name="arrow-forward" size={16} color="#fff" />
+                  <Text style={styles.translateBtnText}>Translate</Text>
+                </TouchableOpacity>
               </View>
             </View>
+          </View>
 
-            {/* Output card */}
-            <View style={styles.outputCard}>
+          {/* Output */}
+          <View style={styles.outputCard}>
+            <View style={styles.outputHeader}>
               <Text style={[styles.cardLabel, styles.cardLabelOutput]}>
                 {LANG_LABEL[targetLang]}
               </Text>
-
-              {showEmptyState ? (
-                <View style={styles.emptyState}>
-                  <View style={styles.emptyIcon}>
-                    <Ionicons name="sparkles-outline" size={28} color="#D95D39" />
-                  </View>
-                  <Text style={styles.emptyTitle}>Translate anything</Text>
-                  <Text style={styles.emptyDesc}>
-                    Type, paste, snap a photo, or pick from gallery — AI Sathi will translate &
-                    speak it back.
-                  </Text>
+              {summary ? (
+                <View style={styles.summaryBadge}>
+                  <Ionicons name="document-text-outline" size={11} color="#2B593F" />
+                  <Text style={styles.summaryBadgeText}>Document summary</Text>
                 </View>
-              ) : (
-                <ScrollView
-                  style={styles.scroll}
-                  showsVerticalScrollIndicator={false}
-                >
-                  {loading || imageBusy ? (
-                    <View style={styles.loadingRow}>
-                      <ActivityIndicator color="#D95D39" />
-                      <Text style={styles.loadingText}>
-                        {imageBusy ? "Reading image…" : "Translating…"}
-                      </Text>
-                    </View>
-                  ) : error ? (
-                    <Text style={styles.errorText}>{error}</Text>
-                  ) : (
-                    <Text
-                      style={styles.outputText}
-                      selectable
-                      testID="translated-text-output"
-                    >
-                      {translated || " "}
-                    </Text>
-                  )}
-                </ScrollView>
-              )}
-
-              {!!translated && !loading && !imageBusy && (
-                <View style={styles.outputActions}>
-                  <TouchableOpacity
-                    testID="copy-clipboard-button"
-                    onPress={handleCopy}
-                    style={styles.outputActionBtn}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons name="copy-outline" size={18} color="#57534E" />
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    testID="play-audio-button"
-                    onPress={handleSpeak}
-                    style={[
-                      styles.outputActionBtn,
-                      speaking && styles.outputActionBtnActive,
-                    ]}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons
-                      name={speaking ? "stop" : "volume-high"}
-                      size={18}
-                      color={speaking ? "#fff" : "#2B593F"}
-                    />
-                  </TouchableOpacity>
-                </View>
-              )}
+              ) : null}
             </View>
+
+            {showEmptyState ? (
+              <View style={styles.emptyState}>
+                <View style={styles.emptyIcon}>
+                  <Ionicons name="sparkles-outline" size={28} color="#D95D39" />
+                </View>
+                <Text style={styles.emptyTitle}>Translate anything</Text>
+                <Text style={styles.emptyDesc}>
+                  Type, snap a photo of a bill or letter, or pick from gallery — AI Sathi will
+                  translate, summarize, and read it aloud.
+                </Text>
+              </View>
+            ) : (
+              <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false}>
+                {loading || imageBusy ? (
+                  <View style={styles.loadingRow}>
+                    <ActivityIndicator color="#D95D39" />
+                    <Text style={styles.loadingText}>
+                      {imageBusy ? "Reading & summarizing image…" : "Translating…"}
+                    </Text>
+                  </View>
+                ) : error ? (
+                  <Text style={styles.errorText}>{error}</Text>
+                ) : (
+                  <View>
+                    {summary ? (
+                      <Text style={styles.outputText} selectable testID="translated-text-output">
+                        {summary}
+                      </Text>
+                    ) : (
+                      <Text style={styles.outputText} selectable testID="translated-text-output">
+                        {translated || " "}
+                      </Text>
+                    )}
+
+                    {actionItems.length > 0 && (
+                      <View style={styles.actionsBox}>
+                        <Text style={styles.actionsTitle}>
+                          {targetLang === "ne" ? "गर्नुपर्ने कामहरू" : "Action items"}
+                        </Text>
+                        {actionItems.map((it, i) => (
+                          <View key={i} style={styles.actionRow}>
+                            <View style={styles.actionDot} />
+                            <Text style={styles.actionText}>{it}</Text>
+                          </View>
+                        ))}
+                      </View>
+                    )}
+
+                    {summary && translated ? (
+                      <View style={styles.fullTranslationBox}>
+                        <Text style={styles.fullTranslationLabel}>Full translation</Text>
+                        <Text style={styles.fullTranslationText} selectable>
+                          {translated}
+                        </Text>
+                      </View>
+                    ) : null}
+                  </View>
+                )}
+
+                {voiceWarning && hasOutput && !loading && !imageBusy && (
+                  <Text style={styles.voiceWarn}>{voiceWarning}</Text>
+                )}
+              </ScrollView>
+            )}
+
+            {hasOutput && !loading && !imageBusy && (
+              <View style={styles.outputActions}>
+                <TouchableOpacity
+                  testID="copy-clipboard-button"
+                  onPress={handleCopy}
+                  style={styles.outputActionBtn}
+                  activeOpacity={0.7}
+                >
+                  <Ionicons name="copy-outline" size={18} color="#57534E" />
+                </TouchableOpacity>
+                <TouchableOpacity
+                  testID="play-audio-button"
+                  onPress={handleSpeakOutput}
+                  style={[
+                    styles.outputActionBtn,
+                    styles.outputActionPrimary,
+                    speaking && styles.outputActionBtnActive,
+                  ]}
+                  activeOpacity={0.85}
+                >
+                  <Ionicons
+                    name={speaking ? "stop" : "volume-high"}
+                    size={18}
+                    color="#fff"
+                  />
+                  <Text style={styles.outputActionPrimaryText}>
+                    {speaking ? "Stop" : "Play"}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            )}
           </View>
-        </TouchableWithoutFeedback>
+        </Pressable>
 
         {/* Bottom toolbar */}
         <View style={styles.bottomBar}>
@@ -442,26 +769,25 @@ export default function Index() {
             )}
           </TouchableOpacity>
           <TouchableOpacity
-            testID="speak-source-button"
-            onPress={() => {
-              if (!sourceText.trim()) return;
-              Speech.stop();
-              Speech.speak(sourceText, {
-                language: SPEECH_LOCALE[sourceLang],
-                rate: 0.95,
-              });
-            }}
-            disabled={!sourceText.trim()}
+            testID="reset-app-button"
+            onPress={handleClear}
+            disabled={!sourceText && !translated}
             style={[
               styles.secondaryFab,
-              !sourceText.trim() && styles.secondaryFabDisabled,
+              !sourceText && !translated && styles.secondaryFabDisabled,
             ]}
             activeOpacity={0.8}
           >
-            <Ionicons name="mic-outline" size={22} color="#57534E" />
+            <Ionicons name="refresh" size={22} color="#57534E" />
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
+
+      <WebCameraModal
+        visible={webCamOpen}
+        onClose={() => setWebCamOpen(false)}
+        onCapture={handleWebCapture}
+      />
     </SafeAreaView>
   );
 }
@@ -472,7 +798,7 @@ const styles = StyleSheet.create({
   header: {
     paddingHorizontal: 24,
     paddingTop: 8,
-    paddingBottom: 8,
+    paddingBottom: 6,
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
@@ -484,17 +810,17 @@ const styles = StyleSheet.create({
     letterSpacing: -0.5,
   },
   brandDot: { color: "#D95D39" },
-  tagline: {
-    fontSize: 12,
-    color: "#78716C",
-    fontWeight: "600",
-    letterSpacing: 0.4,
+  autoSpeakChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    backgroundColor: "rgba(43,89,63,0.08)",
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
   },
-  langPillWrap: {
-    paddingHorizontal: 16,
-    marginBottom: 8,
-    marginTop: 4,
-  },
+  autoSpeakText: { fontSize: 11, fontWeight: "700", letterSpacing: 0.3 },
+  langPillWrap: { paddingHorizontal: 16, marginBottom: 8, marginTop: 4 },
   langPill: {
     flexDirection: "row",
     alignItems: "center",
@@ -505,10 +831,6 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     paddingVertical: 10,
     paddingHorizontal: 18,
-    shadowColor: "#1C1917",
-    shadowOpacity: 0.06,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 4 },
     elevation: 2,
   },
   langSide: { flex: 1 },
@@ -519,11 +841,7 @@ const styles = StyleSheet.create({
     letterSpacing: 1.6,
     marginBottom: 2,
   },
-  langValue: {
-    fontSize: 15,
-    fontWeight: "700",
-    color: "#1C1917",
-  },
+  langValue: { fontSize: 15, fontWeight: "700", color: "#1C1917" },
   swapBtn: {
     width: 40,
     height: 40,
@@ -533,13 +851,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     marginHorizontal: 12,
   },
-  workspace: {
-    flex: 1,
-    paddingHorizontal: 16,
-    paddingTop: 8,
-    paddingBottom: 8,
-    gap: 12,
-  },
+  workspace: { flex: 1, paddingHorizontal: 16, paddingTop: 8, paddingBottom: 8, gap: 12 },
   inputCard: {
     flex: 1,
     backgroundColor: "#FFFFFF",
@@ -547,24 +859,44 @@ const styles = StyleSheet.create({
     padding: 18,
     borderWidth: 1,
     borderColor: "#EFECE6",
-    minHeight: 160,
+    minHeight: 140,
   },
   outputCard: {
-    flex: 1,
+    flex: 1.1,
     backgroundColor: "#F4F1EA",
     borderRadius: 28,
     padding: 18,
     minHeight: 160,
     overflow: "hidden",
   },
+  outputHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 6,
+  },
   cardLabel: {
     fontSize: 10,
     fontWeight: "700",
     color: "#A8A29E",
     letterSpacing: 1.6,
-    marginBottom: 6,
   },
   cardLabelOutput: { color: "#8A7B5C" },
+  summaryBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: "rgba(43,89,63,0.12)",
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: 999,
+  },
+  summaryBadgeText: {
+    fontSize: 10,
+    fontWeight: "700",
+    color: "#2B593F",
+    letterSpacing: 0.4,
+  },
   scroll: { flex: 1 },
   textInput: {
     flex: 1,
@@ -583,11 +915,11 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   charCount: { fontSize: 11, color: "#A8A29E", fontWeight: "600" },
-  utilityActions: { flexDirection: "row", alignItems: "center", gap: 8 },
+  utilityActions: { flexDirection: "row", alignItems: "center", gap: 6 },
   iconGhost: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -597,37 +929,87 @@ const styles = StyleSheet.create({
     gap: 6,
     backgroundColor: "#1C1917",
     paddingHorizontal: 14,
-    paddingVertical: 8,
+    paddingVertical: 9,
     borderRadius: 999,
   },
   translateBtnDisabled: { opacity: 0.4 },
-  translateBtnText: {
-    color: "#fff",
-    fontSize: 13,
-    fontWeight: "700",
-    letterSpacing: 0.2,
-  },
+  translateBtnText: { color: "#fff", fontSize: 13, fontWeight: "700" },
   outputText: {
-    fontSize: 22,
+    fontSize: 20,
     color: "#1C1917",
-    lineHeight: 30,
+    lineHeight: 28,
     fontWeight: "500",
+  },
+  actionsBox: {
+    marginTop: 14,
+    backgroundColor: "rgba(255,255,255,0.65)",
+    borderRadius: 16,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: "rgba(43,89,63,0.18)",
+  },
+  actionsTitle: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#2B593F",
+    letterSpacing: 1.2,
+    textTransform: "uppercase",
+    marginBottom: 8,
+  },
+  actionRow: { flexDirection: "row", alignItems: "flex-start", gap: 8, marginBottom: 6 },
+  actionDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: "#D95D39",
+    marginTop: 8,
+  },
+  actionText: { flex: 1, fontSize: 14, color: "#1C1917", lineHeight: 20 },
+  fullTranslationBox: {
+    marginTop: 12,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(168,162,158,0.3)",
+  },
+  fullTranslationLabel: {
+    fontSize: 10,
+    fontWeight: "700",
+    color: "#A8A29E",
+    letterSpacing: 1.4,
+    textTransform: "uppercase",
+    marginBottom: 4,
+  },
+  fullTranslationText: { fontSize: 14, color: "#57534E", lineHeight: 20 },
+  voiceWarn: {
+    fontSize: 11,
+    color: "#92651D",
+    marginTop: 8,
+    fontStyle: "italic",
   },
   outputActions: {
     flexDirection: "row",
     justifyContent: "flex-end",
-    gap: 10,
+    alignItems: "center",
+    gap: 8,
     marginTop: 10,
   },
   outputActionBtn: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    backgroundColor: "rgba(255,255,255,0.85)",
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: "rgba(255,255,255,0.9)",
     alignItems: "center",
     justifyContent: "center",
   },
-  outputActionBtnActive: { backgroundColor: "#2B593F" },
+  outputActionPrimary: {
+    backgroundColor: "#2B593F",
+    width: "auto",
+    paddingHorizontal: 18,
+    flexDirection: "row",
+    gap: 6,
+  },
+  outputActionPrimaryText: { color: "#fff", fontWeight: "700", fontSize: 14 },
+  outputActionBtnActive: { backgroundColor: "#B0341A" },
   emptyState: {
     flex: 1,
     alignItems: "center",
@@ -655,7 +1037,12 @@ const styles = StyleSheet.create({
     textAlign: "center",
     lineHeight: 19,
   },
-  loadingRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 6 },
+  loadingRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingVertical: 6,
+  },
   loadingText: { fontSize: 14, color: "#78716C", fontWeight: "500" },
   errorText: { fontSize: 14, color: "#B0341A", lineHeight: 20 },
   bottomBar: {
@@ -674,10 +1061,6 @@ const styles = StyleSheet.create({
     backgroundColor: "#D95D39",
     alignItems: "center",
     justifyContent: "center",
-    shadowColor: "#D95D39",
-    shadowOpacity: 0.35,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 8 },
     elevation: 6,
   },
   secondaryFab: {
@@ -689,11 +1072,89 @@ const styles = StyleSheet.create({
     borderColor: "#E7E5E4",
     alignItems: "center",
     justifyContent: "center",
-    shadowColor: "#1C1917",
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 2 },
     elevation: 2,
   },
   secondaryFabDisabled: { opacity: 0.5 },
+
+  // Web camera modal
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(28,25,23,0.85)",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
+  },
+  cameraSheet: {
+    width: "100%",
+    maxWidth: 480,
+    backgroundColor: "#FAFAF8",
+    borderRadius: 28,
+    padding: 18,
+  },
+  cameraHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 12,
+  },
+  cameraTitle: { fontSize: 18, fontWeight: "700", color: "#1C1917" },
+  cameraClose: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: "#F4F1EA",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  cameraVideo: {
+    width: "100%",
+    aspectRatio: 4 / 3,
+    backgroundColor: "#1C1917",
+    borderRadius: 16,
+    overflow: "hidden",
+  },
+  cameraLoading: {
+    position: "absolute",
+    top: 80,
+    left: 0,
+    right: 0,
+    alignItems: "center",
+    gap: 8,
+  },
+  cameraLoadingText: { fontSize: 13, color: "#fff", fontWeight: "600" },
+  cameraError: {
+    paddingVertical: 24,
+    alignItems: "center",
+    gap: 8,
+  },
+  cameraErrorText: {
+    fontSize: 14,
+    color: "#B0341A",
+    fontWeight: "600",
+    textAlign: "center",
+  },
+  cameraErrorHint: {
+    fontSize: 12,
+    color: "#78716C",
+    textAlign: "center",
+    paddingHorizontal: 12,
+  },
+  snapButton: {
+    alignSelf: "center",
+    marginTop: 16,
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    borderWidth: 4,
+    borderColor: "#1C1917",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "transparent",
+  },
+  snapInner: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: "#D95D39",
+  },
 });
