@@ -261,8 +261,10 @@ export default function Index() {
   const [isRecording, setIsRecording] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
   const [recordSeconds, setRecordSeconds] = useState(0);
+  const [keyboardEnabled, setKeyboardEnabled] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const recordTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const inputRef = useRef<TextInput | null>(null);
 
   // Audio recorder hook (expo-audio)
   const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
@@ -762,17 +764,25 @@ export default function Index() {
               showsVerticalScrollIndicator={false}
             >
               <TextInput
+                ref={inputRef}
                 testID="source-text-input"
                 style={styles.textInput}
                 multiline
                 value={sourceText}
                 onChangeText={handleSourceChange}
-                placeholder={PLACEHOLDER[sourceLang]}
+                placeholder={
+                  keyboardEnabled
+                    ? PLACEHOLDER[sourceLang]
+                    : "Tap the mic to speak, or the keyboard icon to type…"
+                }
                 placeholderTextColor="#A8A29E"
                 maxLength={5000}
                 autoCorrect
                 autoCapitalize="sentences"
                 textAlignVertical="top"
+                editable={keyboardEnabled}
+                showSoftInputOnFocus={keyboardEnabled}
+                onBlur={() => setKeyboardEnabled(false)}
               />
             </ScrollView>
             <View style={styles.utilityRow}>
@@ -788,6 +798,30 @@ export default function Index() {
                     <Ionicons name="close" size={18} color="#A8A29E" />
                   </TouchableOpacity>
                 )}
+                <TouchableOpacity
+                  testID="toggle-keyboard-button"
+                  onPress={() => {
+                    if (keyboardEnabled) {
+                      Keyboard.dismiss();
+                      setKeyboardEnabled(false);
+                    } else {
+                      setKeyboardEnabled(true);
+                      // focus on next tick so editable=true is committed first
+                      setTimeout(() => inputRef.current?.focus(), 50);
+                    }
+                  }}
+                  style={[
+                    styles.iconGhost,
+                    keyboardEnabled && styles.iconGhostActive,
+                  ]}
+                  activeOpacity={0.7}
+                >
+                  <Ionicons
+                    name={keyboardEnabled ? "keypad" : "keypad-outline"}
+                    size={18}
+                    color={keyboardEnabled ? "#fff" : "#57534E"}
+                  />
+                </TouchableOpacity>
                 <TouchableOpacity
                   testID="speak-source-button"
                   onPress={toggleRecording}
@@ -1144,6 +1178,9 @@ const styles = StyleSheet.create({
     borderRadius: 18,
     alignItems: "center",
     justifyContent: "center",
+  },
+  iconGhostActive: {
+    backgroundColor: "#1C1917",
   },
   iconRecording: {
     backgroundColor: "#D95D39",
