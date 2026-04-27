@@ -106,13 +106,24 @@ async def translate_text(req: TranslateRequest):
         return TranslateResponse(translated_text=req.text, source_lang=src, target_lang=tgt)
 
     system = (
-        f"You are an expert translator between English and Nepali (नेपाली). "
+        f"You are an expert translator between English and Nepali (नेपाली) "
+        f"who specializes in everyday spoken language. "
         f"Translate the user's text from {LANG_NAMES[src]} to {LANG_NAMES[tgt]}. "
         f"Rules:\n"
         f"1. Output ONLY the translated text. No explanations, no quotes, no labels.\n"
         f"2. Preserve tone, punctuation and line breaks.\n"
         f"3. For Nepali output use Devanagari script. For English use Latin script.\n"
-        f"4. Translate idioms naturally rather than word-for-word."
+        f"4. The input may contain colloquial speech, Nepali SLANG and informal expressions "
+        f"(e.g. 'के गर्ने', 'हो नि', 'ठीक छ नि', 'दामी', 'झुर', 'चौबाटो', 'हजुर', 'भाइ', 'दिदि', "
+        f"'खाजा', 'घुम्न जाने', 'टन्न', 'जाबो', 'रहर', 'जोश', 'मस्त', 'फसाद', 'गफ', 'बाटो'). "
+        f"Translate them naturally to the equivalent everyday phrasing in the target language, "
+        f"NOT word-for-word.\n"
+        f"5. Handle CODE-SWITCHED input where Nepali speakers mix English words "
+        f"(e.g. 'office जान्छु', 'meeting छ', 'time भयो'). Treat the whole sentence as one and "
+        f"produce a clean translation.\n"
+        f"6. If the speaker is fast or the transcription has minor errors, infer the most "
+        f"plausible meaning from context rather than translating literal nonsense.\n"
+        f"7. For idioms, choose a culturally appropriate equivalent rather than literal words."
     )
 
     try:
@@ -334,13 +345,30 @@ async def transcribe_audio(req: TranscribeRequest):
         tmp.close()
 
         stt = OpenAISpeechToText(api_key=EMERGENT_LLM_KEY)
+        # Whisper context prompt — guides the model on register, common words, and slang.
+        # Per Whisper docs, the prompt should be in the SAME script as expected output.
+        nepali_prompt = (
+            "यो एउटा नेपाली कुराकानी हो। बोल्ने मानिसले छिटो बोल्न सक्छ र "
+            "बोलचालका शब्दहरू, स्ल्याङ, र अंग्रेजी शब्दहरू मिसाएर बोल्न सक्छ। "
+            "सामान्य शब्दहरू: नमस्ते, धन्यवाद, कस्तो छ, ठीक छ, हजुर, भाइ, दिदि, "
+            "बाबा, आमा, घर, खाना, पानी, बाटो, बजार, अस्पताल, बैङ्क, कार्यालय, "
+            "कल, मेसेज, समय, आज, भोलि, हिजो, हो नि, के गर्ने, दामी, मस्त, "
+            "जाबो, टन्न, साँच्चै, साथी।"
+        )
+        english_prompt = (
+            "This is everyday spoken English. The speaker may talk fast and use "
+            "casual phrasing, contractions, and common words like hello, please, "
+            "thank you, sorry, yes, no, today, tomorrow, work, family, food, money, bill, payment, due date."
+        )
         kwargs = {
             "model": "whisper-1",
             "response_format": "verbose_json",
             "temperature": 0.0,
         }
-        if req.language and req.language.lower() in {"en", "ne"}:
-            kwargs["language"] = req.language.lower()
+        lang = (req.language or "").lower()
+        if lang in {"en", "ne"}:
+            kwargs["language"] = lang
+            kwargs["prompt"] = nepali_prompt if lang == "ne" else english_prompt
 
         with open(tmp.name, "rb") as audio_file:
             response = await stt.transcribe(file=audio_file, **kwargs)
