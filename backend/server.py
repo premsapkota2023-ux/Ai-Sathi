@@ -121,9 +121,15 @@ async def translate_text(req: TranslateRequest):
         f"5. Handle CODE-SWITCHED input where Nepali speakers mix English words "
         f"(e.g. 'office जान्छु', 'meeting छ', 'time भयो'). Treat the whole sentence as one and "
         f"produce a clean translation.\n"
-        f"6. If the speaker is fast or the transcription has minor errors, infer the most "
+        f"6. Nepali speakers often pronounce V as B in English words. If you see odd-looking "
+        f"transcribed words like 'bideo', 'bery', 'boice', 'balue', 'abailable', 'serbice', "
+        f"'haf' / 'hab', 'gib', 'lob', 'sab', 'leab', 'drib', 'mobie', 'bisit', 'ebening', "
+        f"interpret them as their proper English equivalents (video, very, voice, value, "
+        f"available, service, have, give, love, save, leave, drive, movie, visit, evening) "
+        f"and translate accordingly. Apply the same fix in reverse for B-spelled words.\n"
+        f"7. If the speaker is fast or the transcription has minor errors, infer the most "
         f"plausible meaning from context rather than translating literal nonsense.\n"
-        f"7. For idioms, choose a culturally appropriate equivalent rather than literal words."
+        f"8. For idioms, choose a culturally appropriate equivalent rather than literal words."
     )
 
     try:
@@ -350,15 +356,23 @@ async def transcribe_audio(req: TranscribeRequest):
         nepali_prompt = (
             "यो एउटा नेपाली कुराकानी हो। बोल्ने मानिसले छिटो बोल्न सक्छ र "
             "बोलचालका शब्दहरू, स्ल्याङ, र अंग्रेजी शब्दहरू मिसाएर बोल्न सक्छ। "
+            "नेपाली बोल्नेहरूले अंग्रेजी शब्दहरूमा V र B लाई कहिलेकाहीँ मिसाउँछन्, "
+            "त्यसैले 'video, voice, very, value, available, service, advice, vehicle, "
+            "visit, evening, have, give, love, save, leave, drive, advise, develop, "
+            "movie, vote' जस्ता V भएका अंग्रेजी शब्दहरू पनि सुनिन सक्छन्। "
             "सामान्य शब्दहरू: नमस्ते, धन्यवाद, कस्तो छ, ठीक छ, हजुर, भाइ, दिदि, "
             "बाबा, आमा, घर, खाना, पानी, बाटो, बजार, अस्पताल, बैङ्क, कार्यालय, "
             "कल, मेसेज, समय, आज, भोलि, हिजो, हो नि, के गर्ने, दामी, मस्त, "
             "जाबो, टन्न, साँच्चै, साथी।"
         )
         english_prompt = (
-            "This is everyday spoken English. The speaker may talk fast and use "
-            "casual phrasing, contractions, and common words like hello, please, "
-            "thank you, sorry, yes, no, today, tomorrow, work, family, food, money, bill, payment, due date."
+            "This is everyday spoken English, possibly with a Nepali accent where "
+            "the speaker may pronounce V as B (e.g. saying 'bideo' for video, "
+            "'bery' for very, 'haf' for have). Common words: video, voice, very, "
+            "value, available, service, advice, vehicle, visit, evening, have, "
+            "give, love, save, leave, drive, advise, develop, movie, vote, "
+            "hello, please, thank you, sorry, yes, no, today, tomorrow, work, "
+            "family, food, money, bill, payment, due date."
         )
         kwargs = {
             "model": "whisper-1",
