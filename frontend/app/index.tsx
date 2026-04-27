@@ -1217,9 +1217,9 @@ const styles = StyleSheet.create({
   translateBtnDisabled: { opacity: 0.4 },
   translateBtnText: { color: "#fff", fontSize: 13, fontWeight: "700" },
   outputText: {
-    fontSize: 20,
+    fontSize: 18,
     color: "#1C1917",
-    lineHeight: 28,
+    lineHeight: 26,
     fontWeight: "500",
   },
   actionsBox: {
