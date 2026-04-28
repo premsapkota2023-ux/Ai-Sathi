@@ -65,6 +65,114 @@ class TestTranslateText:
         )
         assert r.status_code == 422, r.text
 
+    # ---------- Iteration 5: calendar_events on /api/translate ----------
+    def test_translate_no_dates_returns_empty_events(self, api_client, base_url):
+        r = api_client.post(
+            f"{base_url}/api/translate",
+            json={"text": "Hello, how are you?", "source_lang": "en", "target_lang": "ne"},
+            timeout=60,
+        )
+        assert r.status_code == 200, r.text
+        data = r.json()
+        assert "calendar_events" in data
+        assert data["calendar_events"] == [], f"Expected empty events, got: {data['calendar_events']}"
+        assert any("\u0900" <= c <= "\u097F" for c in data["translated_text"])
+
+    def test_translate_appointment_date_returns_timed_event(self, api_client, base_url):
+        r = api_client.post(
+            f"{base_url}/api/translate",
+            json={
+                "text": "My doctor appointment is on December 15, 2026 at 10 AM",
+                "source_lang": "en",
+                "target_lang": "ne",
+            },
+            timeout=90,
+        )
+        assert r.status_code == 200, r.text
+        data = r.json()
+        events = data.get("calendar_events") or []
+        assert isinstance(events, list)
+        assert len(events) >= 1, f"Expected at least 1 event, got: {events}"
+        ev = events[0]
+        for k in ("title", "start_iso", "all_day", "type", "description"):
+            assert k in ev, f"missing {k}: {ev}"
+        assert ev["start_iso"].startswith("2026-12-15"), f"date wrong: {ev['start_iso']}"
+        assert "T10:00" in ev["start_iso"], f"time wrong: {ev['start_iso']}"
+        assert ev["all_day"] is False
+        assert ev["type"] in ("appointment", "other")
+        # title should be English Latin
+        assert ev["title"].strip()
+        assert not any("\u0900" <= c <= "\u097F" for c in ev["title"]), \
+            f"title should be English Latin: {ev['title']}"
+        print("APPT translate event=", ev)
+
+    def test_translate_bill_due_date_returns_allday_event(self, api_client, base_url):
+        r = api_client.post(
+            f"{base_url}/api/translate",
+            json={
+                "text": "Pay electricity bill by January 5, 2027",
+                "source_lang": "en",
+                "target_lang": "ne",
+            },
+            timeout=90,
+        )
+        assert r.status_code == 200, r.text
+        data = r.json()
+        events = data.get("calendar_events") or []
+        assert len(events) >= 1, f"Expected event, got: {events}"
+        ev = events[0]
+        assert ev["start_iso"].startswith("2027-01-05"), f"date wrong: {ev['start_iso']}"
+        # for bill due date with no time, should be all_day
+        assert ev["all_day"] is True, f"expected all_day=True, got {ev}"
+        assert ev["type"] in ("bill", "deadline", "other")
+        print("BILL translate event=", ev)
+
+    def test_translate_nepali_source_with_dates_english_titles(self, api_client, base_url):
+        r = api_client.post(
+            f"{base_url}/api/translate",
+            json={
+                "text": "मेरो डाक्टरको appointment डिसेम्बर 15, 2026 मा बिहान 10 बजे छ",
+                "source_lang": "ne",
+                "target_lang": "en",
+            },
+            timeout=90,
+        )
+        assert r.status_code == 200, r.text
+        data = r.json()
+        events = data.get("calendar_events") or []
+        assert len(events) >= 1, f"Expected event, got: {events}"
+        ev = events[0]
+        assert ev["start_iso"].startswith("2026-12-15"), f"date wrong: {ev['start_iso']}"
+        # Title must be English (no Devanagari)
+        assert ev["title"].strip()
+        assert not any("\u0900" <= c <= "\u097F" for c in ev["title"]), \
+            f"title contains Devanagari: {ev['title']}"
+        print("NE->EN translate event=", ev)
+
+    def test_translate_relative_date_returns_empty_events(self, api_client, base_url):
+        r = api_client.post(
+            f"{base_url}/api/translate",
+            json={"text": "see you tomorrow", "source_lang": "en", "target_lang": "ne"},
+            timeout=60,
+        )
+        assert r.status_code == 200, r.text
+        data = r.json()
+        events = data.get("calendar_events")
+        assert events == [], f"Expected empty events for relative date, got: {events}"
+
+    def test_translate_same_lang_has_empty_events(self, api_client, base_url):
+        text = "Pay the bill by December 25, 2026"
+        r = api_client.post(
+            f"{base_url}/api/translate",
+            json={"text": text, "source_lang": "en", "target_lang": "en"},
+            timeout=30,
+        )
+        assert r.status_code == 200, r.text
+        data = r.json()
+        # early-return path: text unchanged, events empty
+        assert data["translated_text"] == text
+        assert data.get("calendar_events") == []
+
 
 # ------------------------------------------------------------
 # /api/translate-image helpers

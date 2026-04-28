@@ -362,7 +362,23 @@ export default function Index() {
         setTranslated(out);
         setSummary("");
         setActionItems([]);
-        setCalendarEvents([]);
+        const events = Array.isArray(data.calendar_events)
+          ? data.calendar_events
+              .filter(
+                (e: any) =>
+                  e &&
+                  typeof e.title === "string" &&
+                  typeof e.start_iso === "string"
+              )
+              .map((e: any) => ({
+                title: e.title,
+                start_iso: e.start_iso,
+                all_day: !!e.all_day,
+                type: e.type || "other",
+                description: e.description || "",
+              }))
+          : [];
+        setCalendarEvents(events);
         setAddedEventIds(new Set());
         if (speakAfter && autoSpeak && out) {
           performSpeak(out, tgt);

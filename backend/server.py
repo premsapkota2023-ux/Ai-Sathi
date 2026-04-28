@@ -7,6 +7,8 @@ import uuid
 import logging
 import base64
 import tempfile
+import json
+import re
 from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import Optional
@@ -36,24 +38,25 @@ class TranslateRequest(BaseModel):
     target_lang: str = Field(..., description="'en' or 'ne'")
 
 
-class TranslateResponse(BaseModel):
-    translated_text: str
-    source_lang: str
-    target_lang: str
-
-
-class ImageTranslateRequest(BaseModel):
-    image_base64: str = Field(..., description="Base64 encoded image (no data: prefix)")
-    mime_type: str = Field(default="image/jpeg")
-    target_lang: str = Field(..., description="'en' or 'ne'")
-
-
 class CalendarEvent(BaseModel):
     title: str
     start_iso: str  # ISO 8601: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS
     all_day: bool = False
     type: str = "other"  # bill | appointment | deadline | other
     description: str = ""
+
+
+class TranslateResponse(BaseModel):
+    translated_text: str
+    source_lang: str
+    target_lang: str
+    calendar_events: list[CalendarEvent] = []
+
+
+class ImageTranslateRequest(BaseModel):
+    image_base64: str = Field(..., description="Base64 encoded image (no data: prefix)")
+    mime_type: str = Field(default="image/jpeg")
+    target_lang: str = Field(..., description="'en' or 'ne'")
 
 
 class ImageTranslateResponse(BaseModel):
@@ -117,37 +120,81 @@ async def translate_text(req: TranslateRequest):
     system = (
         f"You are an expert translator between English and Nepali (नेपाली) "
         f"who specializes in everyday spoken language. "
-        f"Translate the user's text from {LANG_NAMES[src]} to {LANG_NAMES[tgt]}. "
-        f"Rules:\n"
-        f"1. Output ONLY the translated text. No explanations, no quotes, no labels.\n"
-        f"2. Preserve tone, punctuation and line breaks.\n"
-        f"3. For Nepali output use Devanagari script. For English use Latin script.\n"
-        f"4. The input may contain colloquial speech, Nepali SLANG and informal expressions "
-        f"(e.g. 'के गर्ने', 'हो नि', 'ठीक छ नि', 'दामी', 'झुर', 'चौबाटो', 'हजुर', 'भाइ', 'दिदि', "
-        f"'खाजा', 'घुम्न जाने', 'टन्न', 'जाबो', 'रहर', 'जोश', 'मस्त', 'फसाद', 'गफ', 'बाटो'). "
-        f"Translate them naturally to the equivalent everyday phrasing in the target language, "
-        f"NOT word-for-word.\n"
-        f"5. Handle CODE-SWITCHED input where Nepali speakers mix English words "
-        f"(e.g. 'office जान्छु', 'meeting छ', 'time भयो'). Treat the whole sentence as one and "
-        f"produce a clean translation.\n"
-        f"6. Nepali speakers often pronounce V as B in English words. If you see odd-looking "
-        f"transcribed words like 'bideo', 'bery', 'boice', 'balue', 'abailable', 'serbice', "
-        f"'haf' / 'hab', 'gib', 'lob', 'sab', 'leab', 'drib', 'mobie', 'bisit', 'ebening', "
-        f"interpret them as their proper English equivalents (video, very, voice, value, "
-        f"available, service, have, give, love, save, leave, drive, movie, visit, evening) "
-        f"and translate accordingly. Apply the same fix in reverse for B-spelled words.\n"
-        f"7. If the speaker is fast or the transcription has minor errors, infer the most "
-        f"plausible meaning from context rather than translating literal nonsense.\n"
-        f"8. For idioms, choose a culturally appropriate equivalent rather than literal words."
+        f"Translate the user's text from {LANG_NAMES[src]} to {LANG_NAMES[tgt]} AND "
+        f"extract any calendar-worthy events (bill due dates, appointments, deadlines) "
+        f"that the user might want a reminder for.\n\n"
+        f"Return STRICT JSON of the form:\n"
+        '{"translated_text": "<translation in ' + LANG_NAMES[tgt] + '>", '
+        '"calendar_events": [{'
+        '"title": "<short event title in ENGLISH>", '
+        '"start_iso": "<YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS — absolute date/time>", '
+        '"all_day": <true|false>, '
+        '"type": "<bill|appointment|deadline|other>", '
+        '"description": "<1-2 sentence description in ENGLISH>"'
+        '}]}\n\n'
+        f"Translation rules:\n"
+        f"1. Preserve tone, punctuation and line breaks.\n"
+        f"2. For Nepali output use Devanagari script. For English use Latin script.\n"
+        f"3. The input may contain colloquial speech, Nepali SLANG and informal expressions "
+        f"(e.g. 'के गर्ने', 'हो नि', 'दामी', 'झुर'). Translate them naturally to the equivalent "
+        f"everyday phrasing.\n"
+        f"4. Handle CODE-SWITCHED input (Nepali speakers mixing English words). Treat the whole "
+        f"sentence as one and produce a clean translation.\n"
+        f"5. Nepali speakers often pronounce V as B in English. Interpret words like 'bideo', "
+        f"'bery', 'boice', 'bisit', 'ebening' as their proper V equivalents (video, very, "
+        f"voice, visit, evening) and translate accordingly.\n"
+        f"6. For idioms, choose a culturally appropriate equivalent rather than literal words.\n\n"
+        f"Calendar event rules:\n"
+        f"  - Only include events with an ABSOLUTE date (e.g. 'December 15, 2026' or '12/15/2026'). "
+        f"Skip vague dates like 'tomorrow' or 'next week'.\n"
+        f"  - For events without a specific time, set all_day=true.\n"
+        f"  - If no calendar-worthy dates are mentioned, return calendar_events=[].\n\n"
+        f"Output ONLY the JSON object, no markdown, no commentary."
     )
 
     try:
         chat = _build_chat(system)
         result = await chat.send_message(UserMessage(text=req.text))
-        translated = (result or "").strip()
-        if not translated:
+        raw = (result or "").strip()
+        if not raw:
             raise HTTPException(status_code=502, detail="Empty translation from model")
-        return TranslateResponse(translated_text=translated, source_lang=src, target_lang=tgt)
+
+        # Try strict JSON parse with markdown fence stripping
+        translated_text = ""
+        events: list[CalendarEvent] = []
+        cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.MULTILINE).strip()
+        try:
+            parsed = json.loads(cleaned)
+            translated_text = (parsed.get("translated_text") or "").strip()
+            for ev in parsed.get("calendar_events") or []:
+                if not isinstance(ev, dict):
+                    continue
+                title = str(ev.get("title", "")).strip()
+                start_iso = str(ev.get("start_iso", "")).strip()
+                if not title or not start_iso:
+                    continue
+                if not re.match(r"^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?)?$", start_iso):
+                    continue
+                events.append(CalendarEvent(
+                    title=title,
+                    start_iso=start_iso,
+                    all_day=bool(ev.get("all_day", "T" not in start_iso)),
+                    type=str(ev.get("type", "other")).strip().lower() or "other",
+                    description=str(ev.get("description", "")).strip(),
+                ))
+        except Exception:
+            # Fallback: treat whole response as plain translation
+            translated_text = cleaned
+
+        if not translated_text:
+            raise HTTPException(status_code=502, detail="Empty translation from model")
+
+        return TranslateResponse(
+            translated_text=translated_text,
+            source_lang=src,
+            target_lang=tgt,
+            calendar_events=events,
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -206,7 +253,6 @@ async def translate_image(req: ImageTranslateRequest):
         )
 
         # Parse JSON robustly
-        import json, re
         ocr_text = ""
         detected = "unknown"
         if ocr_resp:
