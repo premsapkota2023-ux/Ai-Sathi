@@ -1,0 +1,44 @@
+{
+  "summary": "Iteration 4 (CALENDAR REMINDERS) testing complete. Backend: 21/21 pytest cases pass on first run including 4 brand-new calendar_events tests (bill image -> all_day=true event on 2026-12-15 of type bill/deadline; doctor appointment image -> timed event 2026-01-20T10:30 with all_day=false and type appointment; HELLO WORLD non-actionable image -> empty events []; relative-date 'See you tomorrow' image -> empty events []) plus all iterations 1-3 regression tests still green (translate text en<->ne, image OCR + summary + spoken_message + action_items, transcribe Whisper EN MP3, all 400/422 edge cases). Calendar event schema verified: {title, start_iso, all_day, type, description}. Title is in English (Latin script, no Devanagari) per backend prompt — confirmed 'Pay XYZ Water Bill' style. start_iso strict ISO regex validation in server.py (`^\\d{4}-\\d{2}-\\d{2}(T\\d{2}:\\d{2}(:\\d{2})?)?$`) properly rejects bad dates. Frontend: app loads cleanly on mobile viewport (390x844), zero page errors, all 9 critical testIDs visible (app-header-logo, language-swap-button, source-text-input, speak-source-button, translate-now-button, toggle-keyboard-button, gallery-upload-button, camera-capture-button, reset-app-button, auto-speak-toggle). When calendar_events is empty (no image processed yet, or after text-only translation), eventsBox does NOT render and add-event-button-0 is correctly absent (verified via query_selector = None). Text translation 'hello' -> 'नमस्ते' still works. No JS errors with calendar code present. expo-calendar import is present in index.tsx (line 23) and is bundled without errors.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "index", "issues": ["Same non-blocking RN-web deprecation warnings carried over from iter 1-3: 'props.pointerEvents is deprecated' (use style.pointerEvents). Cosmetic only."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_translator_api.py",
+    "/app/backend/tests/conftest.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "(Optional) Native device testing recommended to exercise the full expo-calendar createEventAsync path (requestCalendarPermissionsAsync, getCalendarsAsync, alarms relativeOffset -60 for timed and -540 for all-day). Headless browser only exercises the .ics download fallback branch.",
+    "(Optional) Consider validating that ev.start_iso parses as a real Date in the backend (not just regex match) to prevent e.g. '2026-13-45' from being passed to the frontend new Date() which would NaN. Currently regex passes 'YYYY-MM-DD' shape but month/day ranges are not bounded.",
+    "(Optional, carry-over from iter 3) add retry/backoff on EMERGENT_LLM_KEY 'Budget exceeded' upstream errors."
+  ],
+  "critical_code_review_comments": [
+    "server.py CalendarEvent pydantic model correctly defines defaults (all_day=False, type='other', description='') and is included in ImageTranslateResponse with default empty list — JSON shape always present even when no events.",
+    "server.py validates each event dict: skips entries without title/start_iso, rejects malformed ISO via regex, casts type to lowercase. Robust against bad LLM JSON.",
+    "server.py prompt explicitly tells the model to use English (Latin script) for title/description because 'calendars handle Latin script better' and to OMIT relative dates ('tomorrow', 'next week') — confirmed both rules respected by gemini-2.5-flash in live tests.",
+    "index.tsx calendar UI: events rendered only when calendarEvents.length > 0 (line 1095) — no empty box when missing/empty. addedEventIds Set tracking + button disabled + 'Added' label switching via addedEventIds.has(i) is clean.",
+    "index.tsx web .ics fallback: builds proper VCALENDAR with VALARM TRIGGER:-P1D, ALL_DAY uses DTSTART;VALUE=DATE: per RFC 5545. UID + DTSTAMP present. Filename sanitized via /[^a-z0-9]+/gi.",
+    "index.tsx native: requestCalendarPermissionsAsync -> getCalendarsAsync(EVENT) -> finds writable calendar (Default/iCloud/Google/isPrimary). Correctly handles isNaN(start.getTime()) and computes endDate = start+1h or end-of-day for all-day. Alarms: -60 min for timed, -540 min (9 hours before midnight = 9 AM day before) for all-day events — matches spec.",
+    "index.tsx state reset: handleClear and callTranslate (text path) both reset calendarEvents=[] and addedEventIds=new Set() — no stale calendar UI after switching from image to text or after reset.",
+    "package.json: expo-calendar dependency present and bundled successfully (no metro errors)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_translator_api.py (added _make_appointment_png_b64 + _make_relative_date_png_b64 helpers and 4 new calendar test cases inside TestTranslateImage)"
+  ],
+  "success_rate": {"backend": "100% (21/21)", "frontend": "100% (load + regression + empty-state calendar UI)"},
+  "seed_data_creation": "None persisted. New PIL-generated PNGs in-memory: doctor appointment letter ('DOCTOR APPOINTMENT / Dr. Smith / Date: January 20, 2026 / Time: 10:30 AM') and relative-date image ('See you tomorrow!').",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Iteration 4 added /api/translate-image response field calendar_events: list[{title:str, start_iso:str (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS), all_day:bool, type: 'bill'|'appointment'|'deadline'|'other', description:str}]. Always present (defaults to []). Backend strictly validates ISO format via regex; titles/descriptions are English (Latin) by design. Frontend renders eventsBox with per-event cards each having testID add-event-button-{i}. On web, tapping triggers .ics download (VCALENDAR + VALARM TRIGGER:-P1D); on native it uses expo-calendar.createEventAsync with relativeOffset alarms (-60 min timed, -540 min all-day). calendarEvents state is reset in handleClear and on text-only translate. Backend tests live in /app/backend/tests/test_translator_api.py — TestTranslateImage class now has 7 tests (3 original + Iter2 summary/actions + Iter4 calendar bill, appointment, no-events, relative-dates). All 21 pytest cases passed in 45.83s. Public URL: https://nepali-ocr-speak.preview.emergentagent.com. EMERGENT_LLM_KEY budget was healthy this run (no 500 retries needed).",
+  "rca_of_issue": "N/A — no defects found in iteration 4."
+}

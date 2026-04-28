@@ -20,6 +20,7 @@ import { Ionicons } from "@expo/vector-icons";
 import * as Speech from "expo-speech";
 import * as ImagePicker from "expo-image-picker";
 import * as Clipboard from "expo-clipboard";
+import * as Calendar from "expo-calendar";
 import {
   useAudioRecorder,
   RecordingPresets,
@@ -271,6 +272,16 @@ export default function Index() {
   const [translated, setTranslated] = useState("");
   const [summary, setSummary] = useState("");
   const [actionItems, setActionItems] = useState<string[]>([]);
+  const [calendarEvents, setCalendarEvents] = useState<
+    {
+      title: string;
+      start_iso: string;
+      all_day: boolean;
+      type: string;
+      description: string;
+    }[]
+  >([]);
+  const [addedEventIds, setAddedEventIds] = useState<Set<number>>(new Set());
   const [loading, setLoading] = useState(false);
   const [imageBusy, setImageBusy] = useState(false);
   const [speaking, setSpeaking] = useState(false);
@@ -351,6 +362,8 @@ export default function Index() {
         setTranslated(out);
         setSummary("");
         setActionItems([]);
+        setCalendarEvents([]);
+        setAddedEventIds(new Set());
         if (speakAfter && autoSpeak && out) {
           performSpeak(out, tgt);
         }
@@ -395,11 +408,131 @@ export default function Index() {
     setTranslated("");
     setSummary("");
     setActionItems([]);
+    setCalendarEvents([]);
+    setAddedEventIds(new Set());
     setError(null);
     setVoiceWarning(null);
     Speech.stop();
     setSpeaking(false);
   }, []);
+
+  // ---------- Calendar reminder ----------
+  const addEventToCalendar = useCallback(
+    async (idx: number) => {
+      const ev = calendarEvents[idx];
+      if (!ev) return;
+      try {
+        if (Platform.OS === "web") {
+          // Generate an .ics file and trigger download
+          const dt = new Date(ev.start_iso);
+          const fmt = (d: Date) =>
+            d
+              .toISOString()
+              .replace(/[-:]/g, "")
+              .replace(/\.\d{3}/, "");
+          const start = ev.all_day
+            ? ev.start_iso.slice(0, 10).replace(/-/g, "")
+            : fmt(dt);
+          const end = ev.all_day
+            ? ev.start_iso.slice(0, 10).replace(/-/g, "")
+            : fmt(new Date(dt.getTime() + 60 * 60 * 1000));
+          const ics = [
+            "BEGIN:VCALENDAR",
+            "VERSION:2.0",
+            "PRODID:-//AI Sathi//EN",
+            "BEGIN:VEVENT",
+            `UID:${Date.now()}@aisathi`,
+            `DTSTAMP:${fmt(new Date())}`,
+            ev.all_day ? `DTSTART;VALUE=DATE:${start}` : `DTSTART:${start}`,
+            ev.all_day ? `DTEND;VALUE=DATE:${end}` : `DTEND:${end}`,
+            `SUMMARY:${ev.title}`,
+            `DESCRIPTION:${(ev.description || "").replace(/\n/g, "\\n")}`,
+            "BEGIN:VALARM",
+            "TRIGGER:-P1D",
+            "ACTION:DISPLAY",
+            "DESCRIPTION:Reminder",
+            "END:VALARM",
+            "END:VEVENT",
+            "END:VCALENDAR",
+          ].join("\r\n");
+          // @ts-ignore
+          const blob = new Blob([ics], { type: "text/calendar" });
+          // @ts-ignore
+          const url = URL.createObjectURL(blob);
+          // @ts-ignore
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = `${ev.title.replace(/[^a-z0-9]+/gi, "_")}.ics`;
+          a.click();
+          // @ts-ignore
+          URL.revokeObjectURL(url);
+          setAddedEventIds((s) => new Set(s).add(idx));
+          return;
+        }
+
+        const perm = await Calendar.requestCalendarPermissionsAsync();
+        if (!perm.granted) {
+          Alert.alert(
+            "Calendar permission needed",
+            "Please allow calendar access so AI Sathi can add reminders for your bills and appointments."
+          );
+          return;
+        }
+
+        // Find a writable calendar — prefer the device default
+        const calendars = await Calendar.getCalendarsAsync(
+          Calendar.EntityTypes.EVENT
+        );
+        const writable = calendars.find(
+          (c) =>
+            c.allowsModifications &&
+            (c.source?.name === "Default" ||
+              c.source?.name === "iCloud" ||
+              c.source?.name === "Google" ||
+              c.isPrimary)
+        );
+        const targetCal = writable || calendars.find((c) => c.allowsModifications);
+        if (!targetCal) {
+          Alert.alert(
+            "No writable calendar",
+            "Could not find a calendar to add events to. Please set up a default calendar in your device's Calendar app."
+          );
+          return;
+        }
+
+        const start = new Date(ev.start_iso);
+        if (isNaN(start.getTime())) {
+          throw new Error("Invalid date");
+        }
+        // For all-day events, set to start of day local; for timed, default 1h
+        const end = new Date(
+          ev.all_day
+            ? new Date(start).setHours(23, 59, 0, 0)
+            : start.getTime() + 60 * 60 * 1000
+        );
+
+        await Calendar.createEventAsync(targetCal.id, {
+          title: ev.title,
+          startDate: start,
+          endDate: end,
+          allDay: ev.all_day,
+          notes: ev.description,
+          alarms: ev.all_day
+            ? [{ relativeOffset: -60 * 9 }] // 9 AM the day before for all-day events
+            : [{ relativeOffset: -60 }], // 1 hour before for timed
+        });
+
+        setAddedEventIds((s) => new Set(s).add(idx));
+        Alert.alert("Reminder added", `"${ev.title}" added to your calendar.`);
+      } catch (e: any) {
+        Alert.alert(
+          "Could not add event",
+          e?.message || "Something went wrong adding to calendar."
+        );
+      }
+    },
+    [calendarEvents]
+  );
 
   // ---------- Voice input (record → Whisper transcribe) ----------
   const startRecording = useCallback(async () => {
@@ -615,9 +748,26 @@ export default function Index() {
         const items: string[] = Array.isArray(data.action_items)
           ? data.action_items.filter((x: any) => typeof x === "string" && x.trim())
           : [];
+        const events = Array.isArray(data.calendar_events)
+          ? data.calendar_events
+              .filter(
+                (e: any) =>
+                  e &&
+                  typeof e.title === "string" &&
+                  typeof e.start_iso === "string"
+              )
+              .map((e: any) => ({
+                title: e.title,
+                start_iso: e.start_iso,
+                all_day: !!e.all_day,
+                type: e.type || "other",
+                description: e.description || "",
+              }))
+          : [];
         setTranslated(t);
         setSummary(s);
         setActionItems(items);
+        setCalendarEvents(events);
         if (autoSpeak && sm) {
           performSpeak(sm, (detected === "en" ? "ne" : detected === "ne" ? "en" : targetLang) as Lang);
         }
@@ -942,6 +1092,87 @@ export default function Index() {
                       </View>
                     )}
 
+                    {calendarEvents.length > 0 && (
+                      <View style={styles.eventsBox}>
+                        <View style={styles.eventsHeader}>
+                          <Ionicons name="calendar" size={14} color="#2B593F" />
+                          <Text style={styles.eventsTitle}>
+                            {targetLang === "ne"
+                              ? "रिमाइन्डर थप्नुहोस्"
+                              : "Set reminders"}
+                          </Text>
+                        </View>
+                        {calendarEvents.map((ev, i) => {
+                          const added = addedEventIds.has(i);
+                          const dt = new Date(ev.start_iso);
+                          const dateStr = isNaN(dt.getTime())
+                            ? ev.start_iso
+                            : dt.toLocaleDateString(undefined, {
+                                weekday: "short",
+                                month: "short",
+                                day: "numeric",
+                                year: "numeric",
+                              });
+                          const timeStr =
+                            !ev.all_day && !isNaN(dt.getTime())
+                              ? dt.toLocaleTimeString(undefined, {
+                                  hour: "numeric",
+                                  minute: "2-digit",
+                                })
+                              : "";
+                          const icon =
+                            ev.type === "bill"
+                              ? "card-outline"
+                              : ev.type === "appointment"
+                              ? "medkit-outline"
+                              : ev.type === "deadline"
+                              ? "alarm-outline"
+                              : "calendar-outline";
+                          return (
+                            <View key={i} style={styles.eventCard}>
+                              <View style={styles.eventLeft}>
+                                <View style={styles.eventIcon}>
+                                  <Ionicons
+                                    name={icon as any}
+                                    size={18}
+                                    color="#2B593F"
+                                  />
+                                </View>
+                                <View style={{ flex: 1 }}>
+                                  <Text style={styles.eventTitle} numberOfLines={2}>
+                                    {ev.title}
+                                  </Text>
+                                  <Text style={styles.eventDate}>
+                                    {dateStr}
+                                    {timeStr ? `  •  ${timeStr}` : ""}
+                                  </Text>
+                                </View>
+                              </View>
+                              <TouchableOpacity
+                                testID={`add-event-button-${i}`}
+                                onPress={() => addEventToCalendar(i)}
+                                disabled={added}
+                                activeOpacity={0.85}
+                                style={[
+                                  styles.eventAddBtn,
+                                  added && styles.eventAddBtnDone,
+                                ]}
+                              >
+                                <Ionicons
+                                  name={added ? "checkmark" : "add"}
+                                  size={18}
+                                  color="#fff"
+                                />
+                                <Text style={styles.eventAddBtnText}>
+                                  {added ? "Added" : "Remind"}
+                                </Text>
+                              </TouchableOpacity>
+                            </View>
+                          );
+                        })}
+                      </View>
+                    )}
+
                     {summary && translated ? (
                       <View style={styles.fullTranslationBox}>
                         <Text style={styles.fullTranslationLabel}>Full translation</Text>
@@ -1247,6 +1478,69 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   actionText: { flex: 1, fontSize: 14, color: "#1C1917", lineHeight: 20 },
+  eventsBox: {
+    marginTop: 12,
+    backgroundColor: "rgba(43,89,63,0.06)",
+    borderRadius: 16,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: "rgba(43,89,63,0.18)",
+  },
+  eventsHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginBottom: 10,
+  },
+  eventsTitle: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#2B593F",
+    letterSpacing: 1.2,
+    textTransform: "uppercase",
+  },
+  eventCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: "#FFFFFF",
+    borderRadius: 14,
+    padding: 10,
+    marginBottom: 8,
+    gap: 10,
+  },
+  eventLeft: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  eventIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: "rgba(43,89,63,0.12)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  eventTitle: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: "#1C1917",
+    marginBottom: 2,
+  },
+  eventDate: { fontSize: 11, color: "#78716C", fontWeight: "600" },
+  eventAddBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: "#2B593F",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 999,
+  },
+  eventAddBtnDone: { backgroundColor: "#78716C" },
+  eventAddBtnText: { color: "#fff", fontSize: 12, fontWeight: "700" },
   fullTranslationBox: {
     marginTop: 12,
     paddingTop: 10,

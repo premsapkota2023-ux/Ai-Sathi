@@ -48,6 +48,14 @@ class ImageTranslateRequest(BaseModel):
     target_lang: str = Field(..., description="'en' or 'ne'")
 
 
+class CalendarEvent(BaseModel):
+    title: str
+    start_iso: str  # ISO 8601: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS
+    all_day: bool = False
+    type: str = "other"  # bill | appointment | deadline | other
+    description: str = ""
+
+
 class ImageTranslateResponse(BaseModel):
     extracted_text: str
     translated_text: str
@@ -56,6 +64,7 @@ class ImageTranslateResponse(BaseModel):
     summary: str = ""
     spoken_message: str = ""
     action_items: list[str] = []
+    calendar_events: list[CalendarEvent] = []
 
 
 class TranscribeRequest(BaseModel):
@@ -251,21 +260,39 @@ async def translate_image(req: ImageTranslateRequest):
             f"You are an assistant helping a {target_label} speaker who may not "
             f"read {target_label} well and needs information by voice. The user "
             f"photographed a document (could be a bill, letter, receipt, sign, "
-            f"prescription, notice, etc.). Read the document carefully and "
-            f"produce a short, plain-spoken explanation in {target_label} that:\n"
+            f"prescription, notice, appointment card, etc.). Read the document "
+            f"carefully and produce a short, plain-spoken explanation in {target_label} that:\n"
             f"  - Identifies what kind of document it is (bill, notice, receipt, etc.)\n"
             f"  - States the most important facts: who it is from, amounts, dates, deadlines, account numbers if relevant.\n"
             f"  - Lists any actions the person must take (pay $X by Y date, call number, reply by date, etc.).\n"
             f"  - Sounds natural when read aloud (no bullet points, no markdown, no labels).\n\n"
+            f"Also extract any CALENDAR EVENTS that the person should be reminded about — bill "
+            f"due dates, doctor appointments, meetings, deadlines, etc. Only include events with "
+            f"an absolute calendar date (e.g. 'December 15, 2026' or '12/15/2026'). DO NOT include "
+            f"vague dates like 'tomorrow' or 'next week'. For bills with no specific time, leave "
+            f"all_day=true. For appointments with a known time, include the time.\n\n"
             f"Return STRICT JSON of the form:\n"
             '{"summary": "<one short sentence in ' + target_label + ' describing the document>", '
             '"spoken_message": "<2-4 short sentences in ' + target_label + ' suitable for text-to-speech>", '
-            '"action_items": ["<short action 1 in ' + target_label + '>", "..."]}\n\n'
-            f"If the document has no actions required, return an empty action_items list. "
+            '"action_items": ["<short action 1 in ' + target_label + '>", "..."], '
+            '"calendar_events": [{'
+            '"title": "<short event title in ENGLISH (calendars handle Latin script better)>", '
+            '"start_iso": "<YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS — the absolute date/time>", '
+            '"all_day": <true | false>, '
+            '"type": "<bill | appointment | deadline | other>", '
+            '"description": "<1-2 sentence description in ENGLISH with key amounts/contact info>"'
+            '}]}\n\n'
+            f"If the document has no actions required, return action_items=[]. "
+            f"If the document has no calendar-worthy dates, return calendar_events=[]. "
             f"Output ONLY the JSON object, no markdown, no commentary."
         )
 
-        summary_obj = {"summary": "", "spoken_message": translated, "action_items": []}
+        summary_obj = {
+            "summary": "",
+            "spoken_message": translated,
+            "action_items": [],
+            "calendar_events": [],
+        }
         try:
             s_chat = _build_chat(summary_system)
             s_input = (
@@ -283,6 +310,27 @@ async def translate_image(req: ImageTranslateRequest):
                     summary_obj["spoken_message"] = spoken
                 items = parsed.get("action_items") or []
                 summary_obj["action_items"] = [str(i).strip() for i in items if str(i).strip()]
+                # Validate calendar events
+                events_raw = parsed.get("calendar_events") or []
+                valid_events = []
+                for ev in events_raw:
+                    if not isinstance(ev, dict):
+                        continue
+                    title = str(ev.get("title", "")).strip()
+                    start_iso = str(ev.get("start_iso", "")).strip()
+                    if not title or not start_iso:
+                        continue
+                    # basic ISO format validation
+                    if not re.match(r"^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?)?$", start_iso):
+                        continue
+                    valid_events.append(CalendarEvent(
+                        title=title,
+                        start_iso=start_iso,
+                        all_day=bool(ev.get("all_day", "T" not in start_iso)),
+                        type=str(ev.get("type", "other")).strip().lower() or "other",
+                        description=str(ev.get("description", "")).strip(),
+                    ))
+                summary_obj["calendar_events"] = valid_events
         except Exception:
             logging.exception("summary generation failed; using translation as fallback")
 
@@ -294,6 +342,7 @@ async def translate_image(req: ImageTranslateRequest):
             summary=summary_obj["summary"],
             spoken_message=summary_obj["spoken_message"],
             action_items=summary_obj["action_items"],
+            calendar_events=summary_obj["calendar_events"],
         )
     except HTTPException:
         raise

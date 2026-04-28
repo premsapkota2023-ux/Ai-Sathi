@@ -123,6 +123,63 @@ def _make_noise_png_b64() -> str:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
+def _make_appointment_png_b64() -> str:
+    """Create a PNG that mimics a doctor appointment letter."""
+    from PIL import Image, ImageDraw, ImageFont
+    img = Image.new("RGB", (800, 500), color=(255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    font = font_small = None
+    for p in [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ]:
+        try:
+            font = ImageFont.truetype(p, 44)
+            font_small = ImageFont.truetype(p, 34)
+            break
+        except Exception:
+            continue
+    if font is None:
+        font = ImageFont.load_default()
+        font_small = font
+    lines = [
+        ("DOCTOR APPOINTMENT", font),
+        ("Dr. Smith", font_small),
+        ("Date: January 20, 2026", font_small),
+        ("Time: 10:30 AM", font_small),
+    ]
+    y = 30
+    for text, f in lines:
+        draw.text((40, y), text, fill=(0, 0, 0), font=f)
+        y += 90
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _make_relative_date_png_b64() -> str:
+    """Image with only relative date references."""
+    from PIL import Image, ImageDraw, ImageFont
+    img = Image.new("RGB", (700, 200), color=(255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    font = None
+    for p in [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ]:
+        try:
+            font = ImageFont.truetype(p, 48)
+            break
+        except Exception:
+            continue
+    if font is None:
+        font = ImageFont.load_default()
+    draw.text((40, 70), "See you tomorrow!", fill=(0, 0, 0), font=font)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
 def _make_text_png_b64(text: str = "HELLO WORLD") -> str:
     """Create a real PNG image containing the given text, return base64 string."""
     from PIL import Image, ImageDraw, ImageFont
@@ -254,6 +311,80 @@ class TestTranslateImage:
         spoken = (data.get("spoken_message") or "").strip()
         assert spoken, "spoken_message should be non-empty even for unreadable images"
         assert isinstance(data.get("action_items"), list)
+
+    # ---------- Iteration 4: calendar_events ----------
+    def test_image_bill_returns_calendar_event(self, api_client, base_url):
+        b64 = _make_bill_png_b64()
+        r = api_client.post(
+            f"{base_url}/api/translate-image",
+            json={"image_base64": b64, "mime_type": "image/png", "target_lang": "ne"},
+            timeout=120,
+        )
+        assert r.status_code == 200, r.text
+        data = r.json()
+        events = data.get("calendar_events")
+        assert isinstance(events, list), f"calendar_events not a list: {events}"
+        assert len(events) >= 1, f"Expected at least 1 event, got: {events}"
+        ev = events[0]
+        # Schema check
+        for key in ("title", "start_iso", "all_day", "type", "description"):
+            assert key in ev, f"Missing key {key} in event: {ev}"
+        # start_iso should be 2026-12-15 (or include it)
+        assert ev["start_iso"].startswith("2026-12-15"), f"Unexpected date: {ev['start_iso']}"
+        assert ev["type"] in ("bill", "deadline", "other"), f"Unexpected type: {ev['type']}"
+        # title/description should be readable English (mostly ASCII letters)
+        assert ev["title"].strip(), "title empty"
+        # Should NOT be Devanagari per spec — calendar uses Latin
+        assert not any("\u0900" <= c <= "\u097F" for c in ev["title"]), f"title in Devanagari: {ev['title']}"
+        print("BILL calendar_event=", ev)
+
+    def test_image_appointment_returns_timed_event(self, api_client, base_url):
+        b64 = _make_appointment_png_b64()
+        r = api_client.post(
+            f"{base_url}/api/translate-image",
+            json={"image_base64": b64, "mime_type": "image/png", "target_lang": "ne"},
+            timeout=120,
+        )
+        assert r.status_code == 200, r.text
+        data = r.json()
+        events = data.get("calendar_events") or []
+        assert isinstance(events, list)
+        assert len(events) >= 1, f"Expected at least 1 event, got: {events}"
+        ev = events[0]
+        assert ev["start_iso"].startswith("2026-01-20"), f"Unexpected date: {ev['start_iso']}"
+        # Should include time (T10:30)
+        assert "T" in ev["start_iso"], f"Expected timed event, got: {ev['start_iso']}"
+        assert "10:30" in ev["start_iso"], f"Expected 10:30 in start_iso: {ev['start_iso']}"
+        assert ev["all_day"] is False, f"Expected all_day False, got: {ev['all_day']}"
+        assert ev["type"] in ("appointment", "other"), f"Unexpected type: {ev['type']}"
+        print("APPT calendar_event=", ev)
+
+    def test_image_no_actionable_returns_empty_events(self, api_client, base_url):
+        # Plain "HELLO WORLD" image — no dates → empty events
+        b64 = _make_text_png_b64("HELLO WORLD")
+        r = api_client.post(
+            f"{base_url}/api/translate-image",
+            json={"image_base64": b64, "mime_type": "image/png", "target_lang": "ne"},
+            timeout=120,
+        )
+        assert r.status_code == 200, r.text
+        data = r.json()
+        events = data.get("calendar_events")
+        assert events == [], f"Expected empty list, got: {events}"
+
+    def test_image_relative_dates_returns_empty_events(self, api_client, base_url):
+        b64 = _make_relative_date_png_b64()
+        r = api_client.post(
+            f"{base_url}/api/translate-image",
+            json={"image_base64": b64, "mime_type": "image/png", "target_lang": "ne"},
+            timeout=120,
+        )
+        assert r.status_code == 200, r.text
+        data = r.json()
+        events = data.get("calendar_events")
+        assert isinstance(events, list)
+        # 'tomorrow' is relative — spec says exclude → empty
+        assert events == [], f"Expected empty list for relative date image, got: {events}"
 
 
 # ------------------------------------------------------------
