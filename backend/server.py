@@ -117,8 +117,13 @@ async def _extract_events_from_text(text: str) -> list[CalendarEvent]:
         r"जनवरी|फेब्रुअरी|मार्च|अप्रिल|मे|जुन|जुलाई|अगस्ट|"
         r"सेप्टेम्बर|अक्टोबर|नोभेम्बर|डिसेम्बर|"
         r"\bबजे\b|\b\d{4}\b|"
-        r"\b(?:appointment|meeting|due|deadline|bill|payment|reminder|"
-        r"appointment|भेट|बिल|मिति|तारिख|तिर्नु)\b)",
+        r"\b(?:today|tomorrow|tonight|tmrw|yesterday|next|this|"
+        r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+        r"mon|tue|wed|thu|fri|sat|sun|"
+        r"morning|afternoon|evening|night|noon|midnight|"
+        r"am|pm|a\.m\.|p\.m\.|o'?clock|"
+        r"appointment|meeting|due|deadline|bill|payment|reminder|schedule|"
+        r"भोलि|आज|अहिले|पर्सि|भेट|बिल|मिति|तारिख|तिर्नु|बिहान|दिउँसो|बेलुका|राति)\b)",
         re.IGNORECASE,
     )
     if not date_signals.search(text):
@@ -140,13 +145,15 @@ async def _extract_events_from_text(text: str) -> list[CalendarEvent]:
         '"description": "<1-2 sentence description in ENGLISH>"'
         '}]}\n\n'
         "Rules:\n"
-        "- Only include events with an ABSOLUTE date (e.g. 'December 15, 2026' or "
-        "'12/15/2026'). Skip vague dates like 'tomorrow' or 'next week'.\n"
-        "- If a year is NOT explicitly mentioned, assume the date is in the FUTURE "
-        f"relative to today ({today}). Pick the next occurrence of that month/day. "
-        "Never use a past year.\n"
+        "- Accept BOTH absolute dates (e.g. 'December 15, 2026', '12/15/2026') AND "
+        "relative dates (e.g. 'tomorrow', 'tonight', 'next Monday', 'in 3 days', "
+        "'this Friday', 'भोलि', 'पर्सि').\n"
+        f"- For relative dates, resolve them to absolute calendar dates relative to TODAY "
+        f"({today}). For example, if today is {today}, 'tomorrow' = the next calendar day.\n"
         "- For events without a specific time, set all_day=true.\n"
-        "- If no calendar-worthy dates are mentioned, return {\"events\": []}.\n"
+        "- For events with a time but no date (e.g. 'at 5pm'), assume TODAY if the time is "
+        "still in the future today, otherwise tomorrow.\n"
+        "- If no event-worthy mention is found at all, return {\"events\": []}.\n"
         "- title and description must be in English (Latin script) regardless of input language.\n"
         "- Output ONLY the JSON object, no markdown fences, no commentary."
     )
