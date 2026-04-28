@@ -31,7 +31,7 @@
 - iOS: NSCameraUsageDescription, NSPhotoLibraryUsageDescription
 - Android: CAMERA, READ_MEDIA_IMAGES
 
-## Iteration 4 (current) — Calendar Reminders
+## Iteration 4 — Calendar Reminders (current) — Calendar Reminders
 - **Auto-extract calendar events** from photographed bills, doctor appointments, deadlines, etc. via Gemini structured JSON output. Only absolute dates allowed (skips "tomorrow"-style relative).
 - New backend response field: `calendar_events: [{title, start_iso, all_day, type, description}]` on `/api/translate-image`. Types: `bill | appointment | deadline | other`.
 - New frontend section "**Set reminders**" appears under summary/actions when events are detected. Each event shows icon (card / medkit / alarm / calendar), formatted date+time, "Remind" button → ✔ "Added" once added.
