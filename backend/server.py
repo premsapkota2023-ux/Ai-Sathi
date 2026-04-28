@@ -9,6 +9,7 @@ import base64
 import tempfile
 import json
 import re
+import asyncio
 from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import Optional
@@ -103,6 +104,83 @@ def _build_chat(system_message: str) -> LlmChat:
     return chat
 
 
+async def _extract_events_from_text(text: str) -> list[CalendarEvent]:
+    """Run a focused Gemini call to extract calendar events from arbitrary text.
+    Returns [] on any failure or if no absolute dates are mentioned."""
+    if not text or not text.strip():
+        return []
+    # Quick regex pre-check: skip the LLM call entirely if there's no date-like signal
+    date_signals = re.compile(
+        r"(\d{1,2}[/\-:]\d{1,2}|"  # 12/15 or 12-15 or 10:30
+        r"\b(?:january|february|march|april|may|june|july|august|"
+        r"september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\b|"
+        r"जनवरी|फेब्रुअरी|मार्च|अप्रिल|मे|जुन|जुलाई|अगस्ट|"
+        r"सेप्टेम्बर|अक्टोबर|नोभेम्बर|डिसेम्बर|"
+        r"\bबजे\b|\b\d{4}\b|"
+        r"\b(?:appointment|meeting|due|deadline|bill|payment|reminder|"
+        r"appointment|भेट|बिल|मिति|तारिख|तिर्नु)\b)",
+        re.IGNORECASE,
+    )
+    if not date_signals.search(text):
+        return []
+
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).strftime("%A, %B %d, %Y")
+    system = (
+        f"You extract calendar reminders from short pieces of text. "
+        f"Today's date is {today}. "
+        "Read the user's text and find any events the person should be reminded "
+        "about (bill due dates, doctor appointments, meetings, deadlines, etc.).\n\n"
+        "Output STRICT JSON of the form:\n"
+        '{"events": [{'
+        '"title": "<short event title in ENGLISH>", '
+        '"start_iso": "<YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS — absolute date/time>", '
+        '"all_day": <true|false>, '
+        '"type": "<bill|appointment|deadline|other>", '
+        '"description": "<1-2 sentence description in ENGLISH>"'
+        '}]}\n\n'
+        "Rules:\n"
+        "- Only include events with an ABSOLUTE date (e.g. 'December 15, 2026' or "
+        "'12/15/2026'). Skip vague dates like 'tomorrow' or 'next week'.\n"
+        "- If a year is NOT explicitly mentioned, assume the date is in the FUTURE "
+        f"relative to today ({today}). Pick the next occurrence of that month/day. "
+        "Never use a past year.\n"
+        "- For events without a specific time, set all_day=true.\n"
+        "- If no calendar-worthy dates are mentioned, return {\"events\": []}.\n"
+        "- title and description must be in English (Latin script) regardless of input language.\n"
+        "- Output ONLY the JSON object, no markdown fences, no commentary."
+    )
+    try:
+        chat = _build_chat(system)
+        resp = await chat.send_message(UserMessage(text=text))
+        if not resp:
+            return []
+        cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", resp.strip(), flags=re.MULTILINE).strip()
+        parsed = json.loads(cleaned)
+        events_raw = parsed.get("events") or []
+        out: list[CalendarEvent] = []
+        for ev in events_raw:
+            if not isinstance(ev, dict):
+                continue
+            title = str(ev.get("title", "")).strip()
+            start_iso = str(ev.get("start_iso", "")).strip()
+            if not title or not start_iso:
+                continue
+            if not re.match(r"^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?)?$", start_iso):
+                continue
+            out.append(CalendarEvent(
+                title=title,
+                start_iso=start_iso,
+                all_day=bool(ev.get("all_day", "T" not in start_iso)),
+                type=str(ev.get("type", "other")).strip().lower() or "other",
+                description=str(ev.get("description", "")).strip(),
+            ))
+        return out
+    except Exception:
+        logging.exception("event extraction failed")
+        return []
+
+
 # ---------- Routes ----------
 @api_router.get("/")
 async def root():
@@ -117,83 +195,48 @@ async def translate_text(req: TranslateRequest):
     if src == tgt:
         return TranslateResponse(translated_text=req.text, source_lang=src, target_lang=tgt)
 
+    # Plain-text translation prompt (NO JSON — far more reliable on flash model)
     system = (
         f"You are an expert translator between English and Nepali (नेपाली) "
         f"who specializes in everyday spoken language. "
-        f"Translate the user's text from {LANG_NAMES[src]} to {LANG_NAMES[tgt]} AND "
-        f"extract any calendar-worthy events (bill due dates, appointments, deadlines) "
-        f"that the user might want a reminder for.\n\n"
-        f"Return STRICT JSON of the form:\n"
-        '{"translated_text": "<translation in ' + LANG_NAMES[tgt] + '>", '
-        '"calendar_events": [{'
-        '"title": "<short event title in ENGLISH>", '
-        '"start_iso": "<YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS — absolute date/time>", '
-        '"all_day": <true|false>, '
-        '"type": "<bill|appointment|deadline|other>", '
-        '"description": "<1-2 sentence description in ENGLISH>"'
-        '}]}\n\n'
-        f"Translation rules:\n"
-        f"1. Preserve tone, punctuation and line breaks.\n"
-        f"2. For Nepali output use Devanagari script. For English use Latin script.\n"
-        f"3. The input may contain colloquial speech, Nepali SLANG and informal expressions "
+        f"Translate the user's text from {LANG_NAMES[src]} to {LANG_NAMES[tgt]}. "
+        f"Rules:\n"
+        f"1. Output ONLY the translated text. No explanations, no quotes, no labels, no JSON.\n"
+        f"2. Preserve tone, punctuation and line breaks.\n"
+        f"3. For Nepali output use Devanagari script. For English use Latin script.\n"
+        f"4. The input may contain colloquial speech, Nepali SLANG and informal expressions "
         f"(e.g. 'के गर्ने', 'हो नि', 'दामी', 'झुर'). Translate them naturally to the equivalent "
         f"everyday phrasing.\n"
-        f"4. Handle CODE-SWITCHED input (Nepali speakers mixing English words). Treat the whole "
-        f"sentence as one and produce a clean translation.\n"
-        f"5. Nepali speakers often pronounce V as B in English. Interpret words like 'bideo', "
-        f"'bery', 'boice', 'bisit', 'ebening' as their proper V equivalents (video, very, "
-        f"voice, visit, evening) and translate accordingly.\n"
-        f"6. For idioms, choose a culturally appropriate equivalent rather than literal words.\n\n"
-        f"Calendar event rules:\n"
-        f"  - Only include events with an ABSOLUTE date (e.g. 'December 15, 2026' or '12/15/2026'). "
-        f"Skip vague dates like 'tomorrow' or 'next week'.\n"
-        f"  - For events without a specific time, set all_day=true.\n"
-        f"  - If no calendar-worthy dates are mentioned, return calendar_events=[].\n\n"
-        f"Output ONLY the JSON object, no markdown, no commentary."
+        f"5. Handle CODE-SWITCHED input where Nepali speakers mix English words. Treat the "
+        f"whole sentence as one and produce a clean translation.\n"
+        f"6. Nepali speakers often pronounce V as B in English words. Words like 'bideo', "
+        f"'bery', 'boice', 'bisit', 'ebening' should be interpreted as their proper V "
+        f"equivalents (video, very, voice, visit, evening) and translated accordingly.\n"
+        f"7. For idioms, choose a culturally appropriate equivalent rather than literal words."
     )
 
-    try:
+    async def do_translate() -> str:
         chat = _build_chat(system)
         result = await chat.send_message(UserMessage(text=req.text))
-        raw = (result or "").strip()
-        if not raw:
-            raise HTTPException(status_code=502, detail="Empty translation from model")
+        return (result or "").strip()
 
-        # Try strict JSON parse with markdown fence stripping
-        translated_text = ""
-        events: list[CalendarEvent] = []
-        cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.MULTILINE).strip()
-        try:
-            parsed = json.loads(cleaned)
-            translated_text = (parsed.get("translated_text") or "").strip()
-            for ev in parsed.get("calendar_events") or []:
-                if not isinstance(ev, dict):
-                    continue
-                title = str(ev.get("title", "")).strip()
-                start_iso = str(ev.get("start_iso", "")).strip()
-                if not title or not start_iso:
-                    continue
-                if not re.match(r"^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?)?$", start_iso):
-                    continue
-                events.append(CalendarEvent(
-                    title=title,
-                    start_iso=start_iso,
-                    all_day=bool(ev.get("all_day", "T" not in start_iso)),
-                    type=str(ev.get("type", "other")).strip().lower() or "other",
-                    description=str(ev.get("description", "")).strip(),
-                ))
-        except Exception:
-            # Fallback: treat whole response as plain translation
-            translated_text = cleaned
+    try:
+        # Run translation and event extraction IN PARALLEL.
+        # If event extraction fails for any reason, we still return translation.
+        translation, events = await asyncio.gather(
+            do_translate(),
+            _extract_events_from_text(req.text),
+            return_exceptions=False,
+        )
 
-        if not translated_text:
+        if not translation:
             raise HTTPException(status_code=502, detail="Empty translation from model")
 
         return TranslateResponse(
-            translated_text=translated_text,
+            translated_text=translation,
             source_lang=src,
             target_lang=tgt,
-            calendar_events=events,
+            calendar_events=events or [],
         )
     except HTTPException:
         raise
