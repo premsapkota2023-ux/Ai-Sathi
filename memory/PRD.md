@@ -31,7 +31,15 @@
 - iOS: NSCameraUsageDescription, NSPhotoLibraryUsageDescription
 - Android: CAMERA, READ_MEDIA_IMAGES
 
-## Iteration 3 (current)
+## Iteration 4 (current) — Calendar Reminders
+- **Auto-extract calendar events** from photographed bills, doctor appointments, deadlines, etc. via Gemini structured JSON output. Only absolute dates allowed (skips "tomorrow"-style relative).
+- New backend response field: `calendar_events: [{title, start_iso, all_day, type, description}]` on `/api/translate-image`. Types: `bill | appointment | deadline | other`.
+- New frontend section "**Set reminders**" appears under summary/actions when events are detected. Each event shows icon (card / medkit / alarm / calendar), formatted date+time, "Remind" button → ✔ "Added" once added.
+- **Native calendar integration** via `expo-calendar`: requests permission, finds writable default calendar (iCloud/Google), creates event with alarm (-60 min for timed, day-before 9 AM for all-day).
+- **Web fallback**: generates a downloadable `.ics` file with a `BEGIN:VALARM TRIGGER:-P1D` reminder.
+- Calendar permissions added to `app.json` (NSCalendarsUsageDescription, NSRemindersUsageDescription, READ_CALENDAR, WRITE_CALENDAR).
+
+## Iteration 3
 - **3-4× faster**: switched Gemini model from `gemini-2.5-pro` to `gemini-2.5-flash` (configurable via `GEMINI_MODEL` env var). Translation now ~1-2s; bill OCR+summary ~6s (down from 30-50s).
 - **Real voice input via Whisper** — solves the iOS keyboard dictation issue where Nepali speech became Romanized Latin text. New `POST /api/transcribe` (OpenAI whisper-1 via `emergentintegrations.OpenAISpeechToText`, EMERGENT_LLM_KEY) takes base64 audio + mime + optional lang hint, returns `{text, language}`. Auto-detects EN/NE.
 - **expo-audio recorder** in frontend (replaces deprecated expo-av): mic button in source row records, shows red dot + seconds counter, hard-caps at 60s, sends to `/api/transcribe`, populates source-text-input with the transcribed Devanagari/Latin, then auto-translates and auto-speaks. Uses `expo-file-system/legacy` for native base64 read; FileReader fallback for web.
