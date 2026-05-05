@@ -1,5 +1,5 @@
 from fastapi import FastAPI, APIRouter, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 import os
@@ -192,6 +192,41 @@ async def _extract_events_from_text(text: str) -> list[CalendarEvent]:
 @api_router.get("/")
 async def root():
     return {"message": "AI Sathi backend running", "model": GEMINI_MODEL}
+
+
+# Temporary endpoint to download the generated app icon files.
+# Allows the user to grab the icons directly from the preview URL without
+# needing GitHub. Whitelisted to icon files only.
+_ICON_DIR = Path("/app/frontend/assets/images")
+_ALLOWED_ICONS = {
+    "icon.png",
+    "adaptive-icon.png",
+    "splash-icon.png",
+    "splash-image.png",
+    "app-image.png",
+    "favicon.png",
+    "icon-master-2048.png",
+    "ai_sathi_icons.zip",
+}
+
+
+@api_router.get("/icons/{filename}")
+async def download_icon(filename: str):
+    if filename not in _ALLOWED_ICONS:
+        raise HTTPException(status_code=404, detail="Not found")
+    if filename == "ai_sathi_icons.zip":
+        path = Path("/tmp/ai_sathi_icons.zip")
+    else:
+        path = _ICON_DIR / filename
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="File not found on disk")
+    media = "image/png" if filename.endswith(".png") else "application/zip"
+    return FileResponse(
+        str(path),
+        media_type=media,
+        filename=filename,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @api_router.post("/translate", response_model=TranslateResponse)
