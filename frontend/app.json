@@ -21,7 +21,7 @@
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
-        "backgroundColor": "#FAFAF8"
+        "backgroundColor": "#2D11B1"
       },
       "edgeToEdgeEnabled": true,
       "permissions": [
@@ -46,7 +46,7 @@
           "image": "./assets/images/splash-icon.png",
           "imageWidth": 200,
           "resizeMode": "contain",
-          "backgroundColor": "#FAFAF8"
+          "backgroundColor": "#2D11B1"
         }
       ],
       "expo-web-browser",
