@@ -292,10 +292,18 @@ async def translate_image(req: ImageTranslateRequest):
     tgt = _validate_lang(req.target_lang)
 
     mime = (req.mime_type or "image/jpeg").lower()
-    if mime not in {"image/jpeg", "image/jpg", "image/png", "image/webp"}:
-        raise HTTPException(status_code=400, detail=f"Unsupported image type: {mime}")
+    allowed_mimes = {
+        "image/jpeg",
+        "image/jpg",
+        "image/png",
+        "image/webp",
+        "application/pdf",
+    }
+    if mime not in allowed_mimes:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {mime}")
     if mime == "image/jpg":
         mime = "image/jpeg"
+    is_pdf = mime == "application/pdf"
 
     # Decode base64 to a temp file (Gemini path supports FileContentWithMimeType)
     b64 = req.image_base64.strip()
@@ -312,9 +320,19 @@ async def translate_image(req: ImageTranslateRequest):
         raise HTTPException(status_code=400, detail="Invalid base64 image")
 
     if len(raw) < 100:
-        raise HTTPException(status_code=400, detail="Image is too small or empty")
+        raise HTTPException(status_code=400, detail="File is too small or empty")
+    # Cap at 20 MB (Gemini's PDF limit; images are usually well under)
+    if len(raw) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="File exceeds 20 MB limit")
 
-    suffix = ".jpg" if mime == "image/jpeg" else (".png" if mime == "image/png" else ".webp")
+    if is_pdf:
+        suffix = ".pdf"
+    elif mime == "image/png":
+        suffix = ".png"
+    elif mime == "image/webp":
+        suffix = ".webp"
+    else:
+        suffix = ".jpg"
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     try:
         tmp.write(raw)
@@ -322,19 +340,34 @@ async def translate_image(req: ImageTranslateRequest):
         tmp.close()
 
         # Step 1: OCR + detect language
-        extract_system = (
-            "You are an OCR engine. Look at the image carefully and extract ALL readable "
-            "text exactly as it appears. The text may be in English (Latin script) or "
-            "Nepali (Devanagari script). Return STRICT JSON of the form:\n"
-            '{"text": "...extracted text...", "language": "en" | "ne" | "unknown"}\n'
-            "Rules: Output ONLY the JSON object, no markdown, no commentary. Preserve "
-            "line breaks inside the text using \\n. If no readable text is present, "
-            'return {"text": "", "language": "unknown"}.'
-        )
+        if is_pdf:
+            extract_system = (
+                "You are an OCR engine reading a multi-page PDF document. "
+                "Extract ALL readable text from EVERY page, in order, separated by "
+                "blank lines between pages. The text may be in English (Latin script) "
+                "or Nepali (Devanagari script). Return STRICT JSON of the form:\n"
+                '{"text": "<all extracted text from all pages, with \\n\\n between pages>", '
+                '"language": "en" | "ne" | "unknown"}\n'
+                "Rules: Output ONLY the JSON object, no markdown, no commentary. "
+                "Preserve line breaks inside the text using \\n. "
+                'If no readable text is present, return {"text": "", "language": "unknown"}.'
+            )
+            extract_user_text = "Extract all text from every page of this PDF and detect its primary language."
+        else:
+            extract_system = (
+                "You are an OCR engine. Look at the image carefully and extract ALL readable "
+                "text exactly as it appears. The text may be in English (Latin script) or "
+                "Nepali (Devanagari script). Return STRICT JSON of the form:\n"
+                '{"text": "...extracted text...", "language": "en" | "ne" | "unknown"}\n'
+                "Rules: Output ONLY the JSON object, no markdown, no commentary. Preserve "
+                "line breaks inside the text using \\n. If no readable text is present, "
+                'return {"text": "", "language": "unknown"}.'
+            )
+            extract_user_text = "Extract text and detect its language."
         chat = _build_chat(extract_system)
         file_content = FileContentWithMimeType(file_path=tmp.name, mime_type=mime)
         ocr_resp = await chat.send_message(
-            UserMessage(text="Extract text and detect its language.", file_contents=[file_content])
+            UserMessage(text=extract_user_text, file_contents=[file_content])
         )
 
         # Parse JSON robustly

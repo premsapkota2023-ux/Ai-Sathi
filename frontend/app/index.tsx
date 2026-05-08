@@ -19,6 +19,7 @@ import { StatusBar } from "expo-status-bar";
 import { Ionicons } from "@expo/vector-icons";
 import * as Speech from "expo-speech";
 import * as ImagePicker from "expo-image-picker";
+import * as DocumentPicker from "expo-document-picker";
 import * as Clipboard from "expo-clipboard";
 import * as Calendar from "expo-calendar";
 import {
@@ -851,6 +852,55 @@ export default function Index() {
     }
   }, [processImage]);
 
+  // Pick a document (PDF or image) — supports multi-page PDFs up to ~20 pages
+  const pickDocument = useCallback(async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: ["application/pdf", "image/*"],
+        copyToCacheDirectory: true,
+        multiple: false,
+      });
+      if (result.canceled || !result.assets?.[0]) return;
+      const asset = result.assets[0];
+      const mime = asset.mimeType || "application/pdf";
+      const uri = asset.uri;
+      if (!uri) {
+        Alert.alert("Error", "Could not read file.");
+        return;
+      }
+
+      // Read file as base64
+      let base64 = "";
+      if (Platform.OS === "web") {
+        const resp = await fetch(uri);
+        const blob = await resp.blob();
+        base64 = await new Promise<string>((resolve, reject) => {
+          // @ts-ignore
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const r = (reader.result as string) || "";
+            const idx = r.indexOf(",");
+            resolve(idx >= 0 ? r.slice(idx + 1) : r);
+          };
+          reader.onerror = () => reject(new Error("Failed to read file"));
+          reader.readAsDataURL(blob);
+        });
+      } else {
+        base64 = await FileSystem.readAsStringAsync(uri, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+      }
+
+      if (!base64) {
+        Alert.alert("Error", "Could not read file data.");
+        return;
+      }
+      await processImage(base64, mime);
+    } catch (e: any) {
+      Alert.alert("Error", e?.message || "Could not pick file");
+    }
+  }, [processImage]);
+
   const handleWebCapture = useCallback(
     (b64: string, mime: string) => {
       setWebCamOpen(false);
@@ -1250,6 +1300,15 @@ export default function Index() {
             activeOpacity={0.8}
           >
             <Ionicons name="images-outline" size={22} color="#57534E" />
+          </TouchableOpacity>
+          <TouchableOpacity
+            testID="document-attach-button"
+            onPress={pickDocument}
+            disabled={imageBusy}
+            style={styles.secondaryFab}
+            activeOpacity={0.8}
+          >
+            <Ionicons name="document-attach-outline" size={22} color="#57534E" />
           </TouchableOpacity>
           <TouchableOpacity
             testID="camera-capture-button"
